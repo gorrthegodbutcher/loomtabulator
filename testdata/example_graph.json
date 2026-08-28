@@ -1,0 +1,26 @@
+{
+  "loomtabulator_graph_version": 1,
+  "name": "v1-example-pipeline",
+  "input": { "ring_name": "LOOM_INPUT_RING", "ring_size": 4096,
+             "record_type": "chrono_record_hdr_v2" },
+  "nodes": [
+    { "id": "n1", "type": "validate", "position": { "x": 0, "y": 100 },
+      "data": { "config": { "require_magic": true } } },
+    { "id": "n2", "type": "extract", "position": { "x": 200, "y": 100 },
+      "data": { "config": { "field_offset_bytes": 0, "field_width_bytes": 8 } } },
+    { "id": "n3", "type": "convert", "position": { "x": 400, "y": 100 },
+      "data": { "config": { "scale": 0.001, "offset": 0.0 } } },
+    { "id": "n4", "type": "forward_udp", "position": { "x": 600, "y": 100 },
+      "data": { "config": {
+        "dst_mac": "ff:ff:ff:ff:ff:ff",
+        "src_ip": "10.0.0.100", "dst_ip": "10.0.0.1",
+        "src_port": 12345, "dst_port": 12345,
+        "hw_checksum": true
+      } } }
+  ],
+  "edges": [
+    { "id": "e1", "source": "n1", "target": "n2" },
+    { "id": "e2", "source": "n2", "target": "n3" },
+    { "id": "e3", "source": "n3", "target": "n4" }
+  ]
+}
