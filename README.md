@@ -10,26 +10,31 @@ block device involved.
 small, composable processing modules - validate, extract a field,
 convert raw counts to engineering units, forward as UDP - and
 eventually let that chain be visually built and edited from a web UI
-(React Flow, Phase 3 - see the project plan for the full design).
-Chrontabulator doesn't have a replay feature yet, so **v1 stands on its
-own**: a built-in synthetic record generator (`testgen`) feeds the
-pipeline instead, so the whole mechanism can be built and verified
-before that integration exists.
+(React Flow, Phase 3 - see `CLAUDE.md`'s "Phase 3 design sketch" for
+the full plan). Chrontabulator doesn't have a replay feature yet, so
+the pipeline **stands on its own**: a built-in synthetic record
+generator (`testgen`) feeds it instead, so the whole mechanism can be
+built and verified before that integration exists.
 
 Named in the same spirit as `chrontabulator` - this is its sibling,
 "weaving" processing modules together into a finished, forwarded
 product.
 
-## v1 scope
+## Scope so far (Phase 1 + 2 done)
 
-Single-process, single-core, no multi-core worker pool or
-epoch/watermark barriers yet (see the project plan's Phase 2), no web
-UI yet (Phase 3), CLI + a hand-written JSON graph file only. A pipeline
-is a strictly linear chain today - one path from the input ring to one
-UDP-forwarding stage at the end; branching pipelines are a later phase.
+CLI + a hand-written JSON graph file only, no web UI yet (Phase 3). A
+pipeline is a strictly linear chain - one path from the input ring to
+one UDP-forwarding stage at the end; branching pipelines are a later
+phase. As of Phase 2, the chain runs across multiple worker lcores
+(`--workers=N`) pulling competitively off the input ring, with an
+epoch/watermark barrier (`src/epoch_barrier.c`) ensuring all of one
+epoch's records finish before the next epoch's are considered started
+- see `CLAUDE.md` for the mechanism.
 
 ```
-[testgen thread] --rte_ring--> [validate -> extract -> convert -> forward_udp] --tx--> NIC
+                              +-> [worker 1: validate -> extract -> convert -> forward_udp] -+
+[testgen thread] --rte_ring-> +-> [worker 2: ...........................................] -+--> NIC
+                              +-> [worker N: ...........................................] -+
 ```
 
 ## Prerequisites
@@ -67,11 +72,19 @@ configured.
   uptime). Default 8080, `0` disables it.
 - `--mtu=BYTES` / `--force-10g` - same meaning as `dpdk-app-example`'s
   equivalent flags.
+- `--workers=N` - worker lcores to run the pipeline on. Default: EAL
+  lcore count minus 1 (the main lcore is orchestration-only - status
+  ticks and shutdown, never blocked inside a barrier drain). Must be
+  `<=` that.
 - `--testgen-rate=N` / `--testgen-count=N` / `--testgen-payload=N` -
   the synthetic input generator standing in for chrontabulator's replay
-  (see "v1 scope" above). Payload is an 8-byte big-endian incrementing
-  counter at offset 0, zero-padded after that - matches
+  (see "Scope so far" above). Payload is an 8-byte big-endian
+  incrementing counter at offset 0, zero-padded after that - matches
   `testdata/example_graph.json`'s `extract` stage config out of the box.
+- `--testgen-barrier-every=N` - insert an epoch barrier record every N
+  data records (0 = never, the default). Manual smoke-test aid for the
+  epoch/watermark barrier - watch stderr for "drained barrier" lines to
+  confirm epochs are advancing at a sane cadence.
 
 Example, against a real NIC bound to `vfio-pci`:
 ```
@@ -119,11 +132,19 @@ consumer (it already does UDP dst-port filtering and a clean summary):
 
 Working now: the stage-chain mechanism, JSON graph loading/validation,
 a synthetic input generator, real UDP forwarding with optional hardware
-checksum offload. Planned: a multi-core worker pool with
-epoch/watermark barriers for ordering across cores (Phase 2); a React
+checksum offload, and (Phase 2) a multi-core worker pool with
+epoch/watermark barriers for ordering across cores. Planned: a React
 Flow web UI for visually building pipelines, served airgapped from a
-Vite-built static bundle baked into the image (Phase 3); real
-integration with chrontabulator's replay feature via a DPDK
-multi-process shared ring, once that feature exists (Phase 4). Full
-design in `~/.claude/plans/noble-kindling-lemon.md` (or wherever this
-session's plan file ended up, if you're reading this later).
+Vite-built static bundle baked into the image (Phase 3 - see
+`CLAUDE.md`'s "Phase 3 design sketch" for the concrete plan: schema,
+new `GET /api/stage-types` + save endpoints, dev container/Node
+changes, the airgap build contract); real integration with
+chrontabulator's replay feature via a DPDK multi-process shared ring,
+once that feature exists (Phase 4).
+
+One known, documented gap from Phase 2 worth flagging here too:
+`src/stages/forward_udp_stage.c` still transmits on a single hardcoded
+TX queue with no locking, so it's not safe for a multi-worker graph
+that ends in it as-is - see `CLAUDE.md`'s "What's NOT built yet" for
+the full note. The real output/forward mechanism (DPDK TX vs. a kernel
+socket vs. writing timestamped files) is still an open decision.
