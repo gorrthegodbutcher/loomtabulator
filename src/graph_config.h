@@ -14,7 +14,12 @@
  *
  * ring_name/ring_size out is what main.c uses to create (v1) or attach
  * to (Phase 4) the input rte_ring - kept here rather than hardcoded in
- * main.c so a graph file is fully self-describing. */
+ * main.c so a graph file is fully self-describing.
+ *
+ * Takes a struct pipeline_chain (see pipeline.h) rather than a full
+ * struct pipeline as of Phase 2 - this function only ever populates
+ * stages[]/stage_count, never per-worker scratch memory or counters, so
+ * it stays exactly as single-threaded/startup-only as it was in v1. */
 
 struct graph_config_result {
 	char ring_name[32];
@@ -32,7 +37,7 @@ struct graph_config_result {
  * runtime error path), never something pipeline_run() itself needs to
  * handle. Any stage state instances already init()'d before a later
  * validation failure are torn down before returning false. */
-bool graph_config_load(const char *path, struct pipeline *pl,
+bool graph_config_load(const char *path, struct pipeline_chain *chain,
 			struct graph_config_result *out, char *errbuf, size_t errbuf_len);
 
 #endif

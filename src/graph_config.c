@@ -64,10 +64,10 @@ find_node_idx(struct node_info *nodes, size_t count, const char *id, size_t *out
 }
 
 bool
-graph_config_load(const char *path, struct pipeline *pl, struct graph_config_result *out,
+graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_config_result *out,
 		   char *errbuf, size_t errbuf_len)
 {
-	memset(pl, 0, sizeof(*pl));
+	memset(chain, 0, sizeof(*chain));
 
 	char *text = read_whole_file(path, errbuf, errbuf_len);
 	if (text == NULL)
@@ -197,9 +197,9 @@ graph_config_load(const char *path, struct pipeline *pl, struct graph_config_res
 				 n->id, n->type);
 			goto teardown_and_fail;
 		}
-		pl->stages[i].stage = stage;
-		pl->stages[i].state = state;
-		pl->stage_count = i + 1;
+		chain->stages[i].stage = stage;
+		chain->stages[i].state = state;
+		chain->stage_count = i + 1;
 		expected_in = stage->out_type;
 	}
 
@@ -213,9 +213,9 @@ graph_config_load(const char *path, struct pipeline *pl, struct graph_config_res
 	return true;
 
 teardown_and_fail:
-	for (size_t i = 0; i < pl->stage_count; i++)
-		if (pl->stages[i].stage->teardown != NULL)
-			pl->stages[i].stage->teardown(pl->stages[i].state);
-	memset(pl, 0, sizeof(*pl));
+	for (size_t i = 0; i < chain->stage_count; i++)
+		if (chain->stages[i].stage->teardown != NULL)
+			chain->stages[i].stage->teardown(chain->stages[i].state);
+	memset(chain, 0, sizeof(*chain));
 	return false;
 }

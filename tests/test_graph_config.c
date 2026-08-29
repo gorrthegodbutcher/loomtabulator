@@ -38,7 +38,7 @@ write_temp_json(const char *content)
 int
 main(void)
 {
-	struct pipeline pl;
+	struct pipeline_chain pl;
 	struct graph_config_result info;
 	char errbuf[256];
 

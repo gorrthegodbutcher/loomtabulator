@@ -21,6 +21,12 @@ struct testgen_config {
 				  * be at least 8 so the v1 example graph's
 				  * extract stage (field_offset_bytes=0,
 				  * field_width_bytes=8) has something to read */
+	uint64_t barrier_every; /* Phase 2 manual smoke-test aid (see the
+				  * project plan's Phase 2 section): insert a
+				  * CHRONO_BARRIER_MAGIC record (record.h)
+				  * after every N data records, hdr->seq set
+				  * to a gapless epoch id starting at 0.
+				  * 0 = never emit barriers (v1 behavior). */
 };
 
 /* pthread entry point - pass a heap-allocated (or stack-stable for the

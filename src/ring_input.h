@@ -3,9 +3,13 @@
 
 #include <rte_ring.h>
 
-/* Creates the input rte_ring (SP/SC in v1 - testgen.c's pthread is the
- * sole producer, the pipeline's main lcore the sole consumer). Phase 4
- * replaces this with rte_ring_lookup() against a ring a separate
+/* Creates the input rte_ring - single-producer/multi-consumer as of
+ * Phase 2 (testgen.c's pthread remains the sole producer, but N pipeline
+ * worker lcores now dequeue competitively from it - see
+ * pipeline_worker.c and epoch_barrier.h for the ordering guarantee this
+ * depends on: rte_ring preserves overall FIFO order across all consumers
+ * combined). Phase 4 replaces this with rte_ring_lookup() against a ring
+ * a separate
  * chrontabulator process created (DPDK multi-process, secondary
  * process attaching to primary-owned shared memory) instead of creating
  * one locally - kept as this one choke-point function so that change

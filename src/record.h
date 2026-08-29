@@ -25,6 +25,18 @@
 
 #define CHRONO_RECORD_MAGIC CHRONO_MAGIC_U64('C', 'H', 'R', 'R', 'E', 'C', '1', ' ')
 
+/* Phase 2: a barrier record uses the exact same chrono_record_hdr framing
+ * (so it flows through the same input ring, preserving the same overall
+ * FIFO-across-consumers ordering a data record gets - see epoch_barrier.h)
+ * but is never passed through the stage chain itself. len is always 0 (no
+ * payload). capture_tsc carries the epoch boundary's timestamp. seq
+ * carries the producer-assigned epoch id (monotonic, gapless, starting at
+ * 0) - epoch_barrier_drain() cross-checks this against its own internally
+ * tracked current_epoch at the moment the barrier is drained, catching
+ * any drift between what the producer thinks the epoch boundary is and
+ * what the consumer side thinks it is. */
+#define CHRONO_BARRIER_MAGIC CHRONO_MAGIC_U64('C', 'H', 'R', 'B', 'A', 'R', '1', ' ')
+
 /* One captured packet's worth of metadata, immediately followed by `len`
  * bytes of payload - identical layout to chrontabulator's own
  * chrono_record_hdr. seq is whatever the producer assigned it (in

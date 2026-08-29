@@ -16,11 +16,31 @@ put_be64(uint8_t *p, uint64_t v)
 	}
 }
 
+static void
+emit_barrier(struct rte_ring *ring, uint64_t epoch_id)
+{
+	uint8_t *blob = malloc(sizeof(struct chrono_record_hdr));
+	if (blob == NULL)
+		return; /* transient - the next barrier attempt will retry */
+
+	struct chrono_record_hdr *hdr = (struct chrono_record_hdr *)blob;
+	hdr->magic = CHRONO_BARRIER_MAGIC;
+	hdr->seq = epoch_id;
+	hdr->capture_tsc = rte_rdtsc();
+	hdr->len = 0;
+	hdr->reserved = 0;
+
+	if (rte_ring_enqueue(ring, blob) != 0)
+		free(blob);
+}
+
 void *
 testgen_run(void *arg)
 {
 	struct testgen_config *cfg = arg;
 	uint64_t sent = 0;
+	uint64_t since_last_barrier = 0;
+	uint64_t epoch_id = 0;
 	uint64_t interval_us = cfg->rate_per_sec != 0 ? 1000000ULL / cfg->rate_per_sec : 0;
 
 	while (!g_stop_requested && (cfg->count == 0 || sent < cfg->count)) {
@@ -57,6 +77,13 @@ testgen_run(void *arg)
 				      * backpressure-drop in this project family */
 
 		sent++;
+		since_last_barrier++;
+		if (cfg->barrier_every != 0 && since_last_barrier >= cfg->barrier_every) {
+			emit_barrier(cfg->ring, epoch_id);
+			epoch_id++;
+			since_last_barrier = 0;
+		}
+
 		if (interval_us != 0)
 			usleep(interval_us);
 	}
