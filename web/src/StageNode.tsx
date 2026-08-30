@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Handle, Position, useUpdateNodeInternals, type NodeProps, type Node } from "@xyflow/react";
-import { colorForPortType, type StageNodeData } from "./graphApi";
+import { colorForPortType, INVALID_HANDLE_ID, type StageNodeData } from "./graphApi";
 
 /* Custom node type, replacing React Flow's default one everywhere in
  * App.tsx - the default type only ever renders a single unnamed source
@@ -9,7 +9,14 @@ import { colorForPortType, type StageNodeData } from "./graphApi";
  * edge's sourceHandle can record which port it came from (see
  * graphApi.ts's source_port round-trip). A single-port node (the
  * overwhelmingly common case) renders exactly one centered source
- * handle - visually identical to the old default-node look.
+ * handle - visually identical to the old default-node look. Every real
+ * stage node (not the synthetic ring-input one) also renders one more
+ * source handle on its right edge, dashed and warning-colored,
+ * regardless of port count - the node's dedicated invalid-record path
+ * (version 5's on_invalid mechanism, see graphApi.ts's
+ * INVALID_HANDLE_ID/StageNodeData.onInvalid comments), deliberately
+ * drawn apart from the normal bottom-edge output flow so it doesn't
+ * read as "just another port."
  *
  * Box chrome (background/border/radius/padding/font) still comes
  * entirely from the node's own `style` prop (STAGE_NODE_STYLE in
@@ -47,6 +54,12 @@ export function StageNode({ id, data }: NodeProps<Node<StageNodeData>>) {
   // out_port_count comment), matching App.tsx's per-edge coloring.
   const targetColor = data.targetConnectedColor ?? "var(--border)";
   const sourceColor = colorForPortType(data.outType);
+  // Warning-toned regardless of theme (not one of colorForPortType's
+  // type colors - this handle doesn't carry a different data type, just
+  // a different DESTINATION for a record this stage flags invalid) -
+  // see graphApi.ts's INVALID_HANDLE_ID/StageNodeData.onInvalid comments
+  // for the full version-5 mechanism this wires into.
+  const invalidColor = "#f43f5e";
 
   return (
     <>
@@ -73,6 +86,21 @@ export function StageNode({ id, data }: NodeProps<Node<StageNodeData>>) {
           }}
         />
       ))}
+      {hasTarget && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          id={INVALID_HANDLE_ID}
+          title={`invalid-record path (on_invalid: ${data.onInvalid}${
+            data.onInvalid === "pass" ? " - normal path also taken if this is left unwired" : ""
+          })`}
+          style={{
+            background: invalidColor,
+            borderColor: invalidColor,
+            borderStyle: "dashed",
+          }}
+        />
+      )}
     </>
   );
 }

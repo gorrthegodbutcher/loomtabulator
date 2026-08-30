@@ -6,8 +6,8 @@
 
 static const struct stage g_stage = {
 	.name = "extract",
-	.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
-	.out_type = PORT_TYPE_EXTRACTED,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
+	.out_type = PORT_TYPE_RAW_RECORD,
 	.init = extract_stage_init,
 	.process = extract_stage_process,
 	.teardown = extract_stage_teardown,

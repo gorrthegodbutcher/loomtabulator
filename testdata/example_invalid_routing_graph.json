@@ -1,0 +1,14 @@
+{
+  "loomtabulator_graph_version": 1,
+  "name": "invalid-routing-smoke-test",
+  "input": { "ring_name": "LOOM_INPUT_RING", "ring_size": 4096 },
+  "nodes": [
+    { "id": "n1", "type": "validate", "data": { "config": { "require_magic": true } } },
+    { "id": "n2", "type": "forward_udp", "data": { "config": { "dst_ip": "127.0.0.1", "dst_port": 45654 } } },
+    { "id": "n3", "type": "dump_binary", "data": { "config": { "path": "/tmp/invalid_records.bin" } } }
+  ],
+  "edges": [
+    { "source": "n1", "target": "n2" },
+    { "source": "n1", "target": "n3", "invalid_target": true }
+  ]
+}

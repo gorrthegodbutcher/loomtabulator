@@ -153,7 +153,7 @@ directly: `./build/test_epoch_barrier`.
   does no sandboxing or vetting of plugins beyond the ABI-version
   check, an accepted tradeoff given it already runs in a container,
   not something the loader tries to mitigate. `STAGE_ABI_VERSION` is
-  currently `4`. Version 3: `struct stage.out_port_count(state)` (a
+  currently `5`. Version 3: `struct stage.out_port_count(state)` (a
   dynamic, per-graph-node callback - `NULL` means "always 1 port," the
   right default for every stage except a genuine leaf) replaced an
   earlier, short-lived `max_out_ports` static ceiling, and `struct
@@ -177,6 +177,50 @@ directly: `./build/test_epoch_barrier`.
   `forward_udp`," which stopped being the only kind of terminal sink
   once `dump_binary`/`dump_text` (new built-ins, neither producing a
   wire frame - see "Stage types" in `README.md`) were added.
+
+  Version 5: `enum stage_port_type` shrank from 5 values to 3 -
+  `PORT_TYPE_VALIDATED` and `PORT_TYPE_EXTRACTED` are gone, found to be
+  actively harmful rather than just redundant once `extract` grew a
+  `"bytes"` slicing mode (added earlier in this same work) alongside its
+  original `"numeric"` mode: both modes had to share one `out_type`
+  (`struct stage.out_type` is a static per-plugin-type field, not
+  per-instance/per-mode), so `PORT_TYPE_EXTRACTED` ended up describing
+  two incompatible shapes - a canonical 8-byte value, or an
+  arbitrary-width raw slice - depending on config, which is exactly the
+  kind of ambiguity a small closed type set exists to prevent. It also
+  meant `extract`'s sliced output couldn't type-check into any stage
+  declaring `raw_record`-only `in_types` (a third-party GFP-framing
+  plugin built alongside this work hit exactly this wall trying to
+  accept a header-stripped slice). Root cause, once traced back: neither
+  removed value was ever a real *shape* difference from
+  `PORT_TYPE_RAW_RECORD` - `validated` differed only in "has this been
+  checked," `extracted` only in "has this been narrowed to a sub-slice
+  or reinterpreted" - both are attributes of trust/processing history,
+  not different kinds of data. That distinction moved to the
+  already-existing (since version 2, previously unused by any built-in)
+  `struct stage_record.flags` bit `STAGE_RECORD_FLAG_INTEGRITY_FAILED`
+  instead - an attribute that stacks (a future range-check stage can
+  flag independently of whatever `validate` already flagged) rather
+  than a type that has to pick exactly one meaning. `validate` is the
+  first built-in to actually set this bit: a bad magic (content still
+  trustworthy in shape) is now flagged-and-passed-through rather than
+  hard-dropped, while a length-accounting failure (genuinely
+  unparseable) still hard-drops exactly as before - see
+  `validate_stage.c`'s own comment.
+
+  This is also when the pipeline engine gained real, generic behavior
+  keyed on that flag - not part of the ABI surface itself (`struct
+  pipeline_stage_instance` is engine-internal, in `pipeline.h`, never
+  seen by a plugin), so it isn't independently why this bumped the ABI
+  version, but it's the reason the type collapse doesn't lose anything:
+  any stage that flags a record via `STAGE_RECORD_FLAG_INTEGRITY_FAILED`
+  gets that record's routing decided by the *graph*, for free, with zero
+  routing code of its own - a new per-node `"on_invalid"`
+  (`"drop"`/`"pass"`) and an edge's `"invalid_target": true` (see
+  `graph_config.h`'s schema comment and README.md's "Invalid-record
+  routing") let a graph author drop, pass through, or redirect flagged
+  records to a completely separate downstream chain, all without
+  touching a single stage's own code.
 - **Startup-time validation over hot-path error handling.** A bad graph
   config is a refuse-to-run startup failure (`graph_config_load()`
   returning false with a clear message), never something discovered
@@ -262,8 +306,16 @@ section on faith):
   one addition, an edge's optional `"source_port"` integer (default
   `0`), didn't need a schema version bump either, matching this file's
   standing "schema allows more than the loader currently enforces"
-  convention. No per-stage config editor yet - a loaded node's
-  `data.config` is carried through save unedited.
+  convention. A right-click context menu on a node offers Rename,
+  Configure (a raw-JSON editor for `data.config`, re-probing port count
+  on save), and Delete. Version 5's invalid-record routing (see
+  "Invalid-record routing" in `README.md`) gets the same two-tier
+  treatment: `StageNode.tsx` renders a second, red/dashed source handle
+  (`INVALID_HANDLE_ID` in `graphApi.ts`) on every real stage node
+  alongside its normal output port(s) - drag an edge from it to wire
+  `"invalid_target": true` - and the context menu grows an "On invalid:
+  drop/pass" toggle for the no-extra-edge cases, both persisting through
+  Save the same way `data.label`/position already do.
 - **Backend**: `GET /api/stage-types` (`src/web_status.c`'s
   `handle_stage_types()`) serializes `src/plugin_loader.c`'s
   dynamically-populated table (one entry per successfully-loaded `.so`

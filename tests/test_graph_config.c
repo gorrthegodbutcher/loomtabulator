@@ -65,38 +65,46 @@ main(void)
 	assert(!graph_config_load(write_temp_json(unknown_type), &pl, &info, errbuf, sizeof(errbuf)));
 	printf("PASS: rejects unknown stage type (%s)\n", errbuf);
 
-	/* Port-type mismatch: convert (expects EXTRACTED) directly after
-	 * validate (produces VALIDATED) */
+	/* Port-type mismatch: extract (expects raw_record) fed convert's
+	 * engineering output directly - the type space collapsed to
+	 * {raw_record, engineering, wire_frame} in version 5 (see
+	 * stage_abi.h's version history), so "validated straight into
+	 * convert" is no longer a mismatch at all (both are raw_record now)
+	 * - engineering is the one type nothing byte-blob-shaped accepts. */
 	const char *type_mismatch =
 		"{\"input\":{\"ring_name\":\"R\"},"
 		"\"nodes\":["
 		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
-		"{\"id\":\"n2\",\"type\":\"convert\",\"data\":{\"config\":{}}}"
+		"{\"id\":\"n2\",\"type\":\"extract\",\"data\":{\"config\":{\"field_offset_bytes\":0,\"field_width_bytes\":8}}},"
+		"{\"id\":\"n3\",\"type\":\"convert\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n4\",\"type\":\"extract\",\"data\":{\"config\":{\"field_offset_bytes\":0,\"field_width_bytes\":8}}}"
 		"],"
-		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"}]}";
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"},{\"source\":\"n2\",\"target\":\"n3\"},"
+		"{\"source\":\"n3\",\"target\":\"n4\"}]}";
 	assert(!graph_config_load(write_temp_json(type_mismatch), &pl, &info, errbuf, sizeof(errbuf)));
-	assert(strstr(errbuf, "doesn't accept an input of type 'validated'") != NULL);
-	assert(strstr(errbuf, "accepts: extracted") != NULL);
+	assert(strstr(errbuf, "doesn't accept an input of type 'engineering'") != NULL);
+	assert(strstr(errbuf, "accepts: raw_record") != NULL);
 	printf("PASS: rejects a port-type mismatch, listing the accepted type(s) (%s)\n", errbuf);
 
-	/* forward_udp now accepts more than one input type - validated
-	 * directly (skipping extract/convert entirely) must succeed. */
-	const char *multi_type_accept =
+	/* validate straight into extract straight into forward_udp - all
+	 * three now share the one raw_record type, so this needs neither
+	 * a multi-bit in_types union nor extract's numeric mode to succeed. */
+	const char *raw_record_chain =
 		"{\"input\":{\"ring_name\":\"R\"},"
 		"\"nodes\":["
 		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
 		"{\"id\":\"n2\",\"type\":\"forward_udp\",\"data\":{\"config\":{\"dst_ip\":\"127.0.0.1\",\"dst_port\":1}}}"
 		"],"
 		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"}]}";
-	assert(graph_config_load(write_temp_json(multi_type_accept), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(graph_config_load(write_temp_json(raw_record_chain), &pl, &info, errbuf, sizeof(errbuf)));
 	for (size_t i = 0; i < pl.stage_count; i++)
 		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
 			pl.stages[i].stage->teardown(pl.stages[i].state);
-	printf("PASS: forward_udp accepts 'validated' directly (one of several accepted types)\n");
+	printf("PASS: validate feeds forward_udp directly - both raw_record now\n");
 
-	/* ...but still rejects 'engineering' specifically (that's the whole
-	 * point of the change - a double isn't an opaque byte blob the way
-	 * raw_record/validated/extracted are). */
+	/* ...but still rejects 'engineering' specifically (the one type
+	 * that genuinely needs interpretation, not just a byte count - see
+	 * stage.h's enum comment). */
 	const char *engineering_rejected =
 		"{\"input\":{\"ring_name\":\"R\"},"
 		"\"nodes\":["
@@ -109,8 +117,7 @@ main(void)
 		"{\"source\":\"n3\",\"target\":\"n4\"}]}";
 	assert(!graph_config_load(write_temp_json(engineering_rejected), &pl, &info, errbuf, sizeof(errbuf)));
 	assert(strstr(errbuf, "doesn't accept an input of type 'engineering'") != NULL);
-	assert(strstr(errbuf, "raw_record") != NULL && strstr(errbuf, "validated") != NULL &&
-	       strstr(errbuf, "extracted") != NULL);
+	assert(strstr(errbuf, "accepts: raw_record") != NULL);
 	printf("PASS: forward_udp still rejects 'engineering' specifically (%s)\n", errbuf);
 
 	/* A leaf whose out_type isn't wire_frame (dump_text's is engineering)
@@ -226,6 +233,83 @@ main(void)
 		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}}],\"edges\":[]}";
 	assert(!graph_config_load(write_temp_json(no_ring), &pl, &info, errbuf, sizeof(errbuf)));
 	printf("PASS: rejects a graph missing input.ring_name (%s)\n", errbuf);
+
+	/* Version-5 "on_invalid"/"invalid_target": a node's normal edge and
+	 * its one optional dedicated invalid-record edge are independent
+	 * routing tables - both wired here, to two distinct leaves. */
+	const char *invalid_routing =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"dump_binary\",\"data\":{\"config\":{\"path\":\"build/test_graph_config_normal.bin\"}}},"
+		"{\"id\":\"n3\",\"type\":\"forward_udp\",\"data\":{\"config\":{\"dst_ip\":\"127.0.0.1\",\"dst_port\":3}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"},"
+		"{\"source\":\"n1\",\"target\":\"n3\",\"invalid_target\":true}]}";
+	assert(graph_config_load(write_temp_json(invalid_routing), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(pl.stage_count == 3);
+	assert(strcmp(pl.stages[pl.root_idx].stage->name, "validate") == 0);
+	assert(pl.stages[pl.root_idx].children[0] >= 0 &&
+	       strcmp(pl.stages[pl.stages[pl.root_idx].children[0]].stage->name, "dump_binary") == 0);
+	assert(pl.stages[pl.root_idx].invalid_child >= 0 &&
+	       strcmp(pl.stages[pl.stages[pl.root_idx].invalid_child].stage->name, "forward_udp") == 0);
+	assert(pl.stages[pl.root_idx].pass_invalid == false); /* default, not requested here */
+	for (size_t i = 0; i < pl.stage_count; i++)
+		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
+			pl.stages[i].stage->teardown(pl.stages[i].state);
+	printf("PASS: loads a graph wiring both a node's normal edge and its invalid-record edge\n");
+
+	/* "on_invalid": "pass" is accepted (a real, distinct choice from the
+	 * default "drop") */
+	const char *on_invalid_pass =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{},\"on_invalid\":\"pass\"}},"
+		"{\"id\":\"n2\",\"type\":\"dump_binary\",\"data\":{\"config\":{\"path\":\"build/test_graph_config_pass.bin\"}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"}]}";
+	assert(graph_config_load(write_temp_json(on_invalid_pass), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(pl.stages[pl.root_idx].invalid_child == -1);
+	assert(pl.stages[pl.root_idx].pass_invalid == true);
+	for (size_t i = 0; i < pl.stage_count; i++)
+		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
+			pl.stages[i].stage->teardown(pl.stages[i].state);
+	printf("PASS: \"on_invalid\": \"pass\" is accepted and resolved\n");
+
+	/* An unrecognized on_invalid value is a startup error */
+	const char *on_invalid_bad =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":[{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{},\"on_invalid\":\"quarantine\"}}],"
+		"\"edges\":[]}";
+	assert(!graph_config_load(write_temp_json(on_invalid_bad), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "must be \"drop\" or \"pass\"") != NULL);
+	printf("PASS: rejects an unrecognized \"on_invalid\" value (%s)\n", errbuf);
+
+	/* invalid_target and source_port are mutually exclusive on one edge */
+	const char *invalid_target_with_source_port =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"dump_binary\",\"data\":{\"config\":{\"path\":\"build/test_graph_config_x.bin\"}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\",\"invalid_target\":true,\"source_port\":0}]}";
+	assert(!graph_config_load(write_temp_json(invalid_target_with_source_port), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "mutually exclusive") != NULL);
+	printf("PASS: rejects invalid_target combined with source_port on one edge (%s)\n", errbuf);
+
+	/* A node can have at most one invalid-record edge */
+	const char *two_invalid_targets =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"dump_binary\",\"data\":{\"config\":{\"path\":\"build/test_graph_config_y.bin\"}}},"
+		"{\"id\":\"n3\",\"type\":\"dump_binary\",\"data\":{\"config\":{\"path\":\"build/test_graph_config_z.bin\"}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\",\"invalid_target\":true},"
+		"{\"source\":\"n1\",\"target\":\"n3\",\"invalid_target\":true}]}";
+	assert(!graph_config_load(write_temp_json(two_invalid_targets), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "already has an invalid-record edge") != NULL);
+	printf("PASS: rejects a second invalid-record edge from the same node (%s)\n", errbuf);
 
 	printf("\nALL TESTS PASSED\n");
 	return 0;

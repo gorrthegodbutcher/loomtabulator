@@ -3,11 +3,27 @@
 #include "validate_stage.h"
 #include "../record.h"
 
-/* PORT_TYPE_RAW_RECORD -> PORT_TYPE_VALIDATED. Confirms a record read off
- * the input ring is actually well-formed before anything downstream
- * trusts it - the same "check once, trust after" shape as chrontabulator's
- * own magic==0 padding check, just at the front of this pipeline instead
- * of at read time off disk. */
+/* PORT_TYPE_RAW_RECORD -> PORT_TYPE_RAW_RECORD (same shape either way -
+ * see stage.h's enum comment for why "checked or not" isn't its own
+ * type). Confirms a record read off the input ring is actually
+ * well-formed before anything downstream trusts it - the same "check
+ * once, trust after" shape as chrontabulator's own magic==0 padding
+ * check, just at the front of this pipeline instead of at read time off
+ * disk.
+ *
+ * Two kinds of failure, handled differently:
+ *   - too short, or hdr->len inconsistent with the record's actual
+ *     size: genuinely unparseable - nothing downstream could safely
+ *     compute payload bounds from a length field that doesn't match
+ *     reality, so this is always a hard ok=false drop, not configurable.
+ *   - bad magic: the record's SHAPE is still trustworthy (length
+ *     accounting checks out), it just doesn't look like a genuine
+ *     capture record - a content judgment, not a structural one, so
+ *     it's flagged (STAGE_RECORD_FLAG_INTEGRITY_FAILED) and passed
+ *     through rather than hard-dropped. What actually happens to a
+ *     flagged record (dropped anyway, passed on untouched, or routed to
+ *     a dedicated diagnostic edge) is graph_config.c's/pipeline.c's
+ *     call, not this stage's - see stage.h's flag comment. */
 
 struct validate_config {
 	bool require_magic;
@@ -38,21 +54,21 @@ validate_stage_process(void *state, const struct stage_record *in, struct stage_
 
 	const struct chrono_record_hdr *hdr = (const struct chrono_record_hdr *)in->data;
 
-	if (cfg->require_magic && hdr->magic != CHRONO_RECORD_MAGIC)
-		return (struct stage_result){ .ok = false, .drop_reason = "bad magic" };
-
 	if ((uint64_t)sizeof(*hdr) + hdr->len != in->len)
 		return (struct stage_result){ .ok = false, .drop_reason = "hdr->len doesn't match record size" };
 
-	/* Same wire shape as RAW_RECORD - just relabeled once it's known
-	 * sane. Always a full copy (not aliasing in->data), same "every
-	 * stage owns its own scratch buffer" simplicity as every other v1
-	 * stage - see pipeline.c's own comment on why zero-copy is a later
-	 * optimization, not a v1 concern. */
+	bool magic_bad = cfg->require_magic && hdr->magic != CHRONO_RECORD_MAGIC;
+
+	/* Always a full copy (not aliasing in->data), same "every stage owns
+	 * its own scratch buffer" simplicity as every other v1 stage - see
+	 * pipeline.c's own comment on why zero-copy is a later optimization,
+	 * not a v1 concern. */
 	memcpy(out->data, in->data, in->len);
-	out->type = PORT_TYPE_VALIDATED;
+	out->type = PORT_TYPE_RAW_RECORD;
 	out->len = in->len;
 	out->capture_tsc = in->capture_tsc;
+	if (magic_bad)
+		out->flags |= STAGE_RECORD_FLAG_INTEGRITY_FAILED;
 	return (struct stage_result){ .ok = true };
 }
 

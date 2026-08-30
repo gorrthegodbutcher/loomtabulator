@@ -131,33 +131,88 @@ exact same mechanism a third-party plugin uses - no special-casing
 between "built-in" and "external":
 
 - **`validate`** - confirms `chrono_record_hdr.magic`/`len` are sane.
-  Config: `require_magic` (bool, default true).
-- **`extract`** - pulls one fixed-offset, fixed-width big-endian field
-  out of the payload. Config: `field_offset_bytes`, `field_width_bytes`
-  (2, 4, or 8).
+  Config: `require_magic` (bool, default true). A `len` mismatch (or a
+  record shorter than the header) is always a hard drop - the record
+  isn't even parseable. A bad magic is different: the record's shape is
+  still trustworthy, so it's flagged (`STAGE_RECORD_FLAG_INTEGRITY_
+  FAILED`, see "Invalid-record routing" below) and passed through
+  rather than dropped outright - what actually happens to it from there
+  is the graph's call, not this stage's.
+- **`extract`** - two modes, via `mode` (`"numeric"`, the default, or
+  `"bytes"`). `"numeric"` pulls one fixed-offset, fixed-width big-endian
+  field out of the payload and re-encodes it as a canonical 8-byte
+  value (config: `field_offset_bytes`, `field_width_bytes` - 2, 4, or
+  8) - the only mode `convert` (below) can consume, though the type
+  system doesn't enforce that anymore (see "Type simplification"
+  below); its own runtime length check does. `"bytes"` copies a byte
+  range verbatim, any offset/length, with no reinterpretation (config:
+  `field_offset_bytes`, `field_length_bytes`) - for slicing off a
+  prefix (e.g. `chrono_record_hdr`) before handing the rest to another
+  stage.
 - **`convert`** - linear raw-to-engineering calibration:
   `engineering = raw * scale + offset`. Config: `scale`, `offset`.
 - **`forward_udp`** - a leaf. Sends a record's bytes verbatim as a UDP
   payload over a plain kernel socket (one per stage instance, created
-  at graph-load time). Accepts `raw_record`/`validated`/`extracted`
-  (opaque byte blobs - shipped as-is, whatever width they happen to
-  be) but deliberately not `engineering` (a double needs an explicit
-  encoding step first - see `dump_text` below, or `forward_udp_stage.c`'s
-  own header comment for why). Config: `dst_ip`, `dst_port` (required),
-  `src_ip`, `src_port` (optional - only needed to bind to a specific
-  local address/port, e.g. on a multi-homed host; otherwise the kernel
-  picks the route and an ephemeral port itself, like any ordinary UDP
-  client).
+  at graph-load time). Accepts `raw_record` (an opaque byte blob -
+  shipped as-is, whatever length it happens to be) but deliberately not
+  `engineering` (a double needs an explicit encoding step first - see
+  `dump_text` below, or `forward_udp_stage.c`'s own header comment for
+  why). Config: `dst_ip`, `dst_port` (required), `src_ip`, `src_port`
+  (optional - only needed to bind to a specific local address/port,
+  e.g. on a multi-homed host; otherwise the kernel picks the route and
+  an ephemeral port itself, like any ordinary UDP client).
 - **`dump_binary`** - a leaf. Writes every record's bytes verbatim to a
-  file, back to back, no framing added - accepts any byte-blob type
-  (`raw_record`/`validated`/`extracted`/`wire_frame`), a generic
-  "capture whatever's flowing at this point" debugging tool. Config:
-  `path` (required; truncated on open).
+  file, back to back, no framing added - accepts `raw_record`/
+  `wire_frame`, a generic "capture whatever's flowing at this point"
+  debugging tool. Config: `path` (required; truncated on open).
 - **`dump_text`** - a leaf, and the built-in consumer of `convert`'s
   output. Formats each `engineering` value as ASCII text (`%.17g`)
   followed by a literal carriage return (`\r`, not `\n` - see
   `dump_text_stage.c`'s own comment), one value per record. Config:
   `path` (required; truncated on open).
+
+### Type simplification (version 5)
+
+`enum stage_port_type` has three values now - `raw_record`,
+`engineering`, `wire_frame`. `validated` and `extracted` are gone:
+both only ever described the same wire shape as `raw_record` (an
+opaque byte blob), differing just in "has this been checked" or
+"has this been narrowed to a sub-slice" - not real shape differences,
+and `extract`'s own `"bytes"` mode proved the model actively harmful
+(it made `extracted` describe two incompatible things depending on
+config). "Has this record passed a check" moved to `struct
+stage_record.flags` (`STAGE_RECORD_FLAG_INTEGRITY_FAILED`) instead - an
+attribute of the data, not a type of it, and one that stacks (a future
+range-check stage can flag independently of whatever `validate` already
+flagged). Chain position still tells you what's been checked, exactly
+as before: nothing reaches `convert` without going through `extract`
+first, enforced by `in_types` membership, not a dedicated type.
+
+### Invalid-record routing (version 5)
+
+Any stage - built-in or third-party - that sets
+`STAGE_RECORD_FLAG_INTEGRITY_FAILED` on its output gets flagged-record
+routing for free, decided by the *graph*, not the stage. Per node, in
+the graph JSON:
+
+- `"data": {"on_invalid": "drop"}` (the default, omit to get this) -
+  a flagged record is dropped, same as an ordinary `ok=false` result.
+- `"data": {"on_invalid": "pass"}` - a flagged record continues down
+  the node's normal edge unchanged, flag still set.
+- An edge with `"invalid_target": true` (instead of `"source_port"`) -
+  a flagged record goes down this dedicated edge instead, to a
+  completely different downstream chain (e.g. a `dump_binary`
+  quarantine file). Mutually exclusive with `"source_port"` on the same
+  edge; at most one per source node; overrides `"on_invalid"` if both
+  are present.
+
+`validate` is the first (and so far only) built-in to set this bit -
+see its own description above. `testdata/example_invalid_routing_graph.json`
+is a worked example (`validate` wired to both `forward_udp`, its normal
+path, and a `dump_binary` quarantine file via `invalid_target`). The web
+UI (Phase 3) surfaces both knobs too: each stage node grows a second,
+red/dashed source handle for its invalid-record edge, and a right-click
+"On invalid: drop/pass" toggle in its context menu.
 
 New stage types are built entirely outside this repo: implement
 `struct stage`'s init/process/teardown contract - a stage can accept
