@@ -76,6 +76,18 @@ available unless `plugins/` exists and is populated, or
 ./loomtabulator <EAL args> -- --graph=PATH [options]
 ```
 
+`main.c` injects `--file-prefix=loomtabulator --huge-unlink=existing`
+into the EAL args automatically unless you've already passed your own
+(an explicit override always wins) - this namespaces this process's own
+DPDK runtime/hugepage state away from any other DPDK app on the same
+host (this repo's own test suite included) and, on every startup,
+has DPDK purge whatever a *previous, already-exited* loomtabulator run
+left behind (hugepage-backed segment files and the
+`/var/run/dpdk/<prefix>/` runtime directory are NOT removed by a clean
+shutdown by default, and otherwise accumulate indefinitely across
+restarts). Skipped automatically if you pass `--no-huge` yourself
+(hugepages aren't in play at all then).
+
 - `--graph=PATH` (required) - the JSON pipeline definition to load. See
   `testdata/example_graph.json` for the basic shape: `input` (the ring
   to create), `nodes` (stage instances, each a `type` matching a loaded
@@ -87,9 +99,11 @@ available unless `plugins/` exists and is populated, or
 - `--web-port=N` - `GET /status.json` (records in/dropped/forwarded,
   uptime), `GET /api/stage-types` (Phase 3 web UI's palette data),
   `GET /api/graph` / `POST /api/graph` (load/save the graph file - a
-  save validates but does not affect the running pipeline; restart to
-  apply it), and static files from `--web-root`. Default 8080, `0`
-  disables it.
+  save validates but does not affect the running pipeline),
+  `POST /api/reload` (gracefully restarts the process in place -
+  same PID, via `execv()` - applying whatever graph is currently
+  saved; the web UI's Save panel has a matching Reload button), and
+  static files from `--web-root`. Default 8080, `0` disables it.
 - `--web-root=PATH` - directory holding the built Phase 3 web UI
   (`web/dist/`) to serve as static files. Default `../web/dist`
   (matches running `./build/loomtabulator` from within `src/`); empty

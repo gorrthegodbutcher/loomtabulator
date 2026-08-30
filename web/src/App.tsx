@@ -19,6 +19,8 @@ import { fetchStageTypes, type StageType } from "./stageTypes";
 import {
   fetchGraph,
   saveGraph,
+  reloadGraph,
+  waitForReload,
   makeRingInputNode,
   probePortCount,
   colorForPortType,
@@ -55,6 +57,9 @@ function App() {
   const [saveStatus, setSaveStatus] = useState<{ kind: "idle" | "saving" | "ok" | "error"; message?: string }>({
     kind: "idle",
   });
+  const [reloadStatus, setReloadStatus] = useState<
+    { kind: "idle" | "reloading" | "ok" | "error"; message?: string }
+  >({ kind: "idle" });
   const graphMeta = useRef<GraphMeta>(DEFAULT_META);
   const [graphApiEnabled, setGraphApiEnabled] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null);
@@ -150,6 +155,25 @@ function App() {
     const result = await saveGraph(graphMeta.current, nodes, edges);
     setSaveStatus(result.ok ? { kind: "ok" } : { kind: "error", message: result.error });
   }, [nodes, edges]);
+
+  // Reload: POSTs /api/reload (main.c gracefully shuts down and
+  // re-exec's itself - see graphApi.ts's own comment), then polls until
+  // the server answers again. Not gated on having just saved - reloading
+  // with no new save just re-applies the same graph file unchanged,
+  // which is a reasonable thing to want on its own (e.g. after fixing
+  // something out of band).
+  const onReload = useCallback(async () => {
+    setReloadStatus({ kind: "reloading" });
+    const result = await reloadGraph();
+    if (!result.ok) {
+      setReloadStatus({ kind: "error", message: result.error });
+      return;
+    }
+    const backUp = await waitForReload();
+    setReloadStatus(
+      backUp ? { kind: "ok" } : { kind: "error", message: "timed out waiting for it to come back up" },
+    );
+  }, []);
 
   // Right-click node menu: Rename/Delete. Rename only ever touches
   // data.label (never data.type/id - those have to stay the real
@@ -333,6 +357,15 @@ function App() {
         <button className="btn" onClick={onSave} disabled={!graphApiEnabled || saveStatus.kind === "saving"}>
           {saveStatus.kind === "saving" ? "Saving..." : "Save graph"}
         </button>
+        <button
+          className="btn"
+          style={{ marginTop: 8 }}
+          onClick={onReload}
+          disabled={!graphApiEnabled || reloadStatus.kind === "reloading"}
+          title="Gracefully restarts loomtabulator, applying whatever graph is currently saved"
+        >
+          {reloadStatus.kind === "reloading" ? "Reloading..." : "Reload"}
+        </button>
         {!graphApiEnabled && (
           <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>
             Graph API not enabled on this binary (started without --web-port or the graph file
@@ -341,13 +374,28 @@ function App() {
         )}
         {saveStatus.kind === "ok" && (
           <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>
-            Saved. Restart loomtabulator to apply this graph - saving does not affect the
-            currently running pipeline.
+            Saved. Click Reload to apply this graph - saving alone does not affect the currently
+            running pipeline.
           </p>
         )}
         {saveStatus.kind === "error" && (
           <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
             {saveStatus.message}
+          </p>
+        )}
+        {reloadStatus.kind === "reloading" && (
+          <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>
+            Restarting loomtabulator and waiting for it to come back up...
+          </p>
+        )}
+        {reloadStatus.kind === "ok" && (
+          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>
+            Reloaded - the new graph is now running.
+          </p>
+        )}
+        {reloadStatus.kind === "error" && (
+          <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
+            Reload failed: {reloadStatus.message}
           </p>
         )}
         {configNotice && (

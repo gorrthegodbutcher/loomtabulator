@@ -13,17 +13,24 @@
  * for the UI to load on open), POST /api/graph (validates a new graph
  * exactly as startup does and, on success, writes it to --graph=PATH's
  * file - it does NOT hot-swap the running pipeline; the response says
- * so, and the process needs a restart to actually pick it up),
- * POST /api/probe-port-count (builds one throwaway stage instance from
- * a {"type","config"} body and reports its out_port_count() - the web
- * UI's only way to know how many handles a multi-port node needs,
- * since that's an instance property, not something GET /api/stage-types'
- * per-type listing can answer). CLAUDE.md's Phase 3 design
- * sketch flagged live-reload-vs-restart as an open decision; this
- * resolves it in favor of restart, deliberately - hot-swapping the
- * running pipeline_chain would mean sharing it with epoch_barrier.c's
- * worker-pool synchronization, which is real, correctness-critical,
- * already-subtle code not worth destabilizing for this. Static files
+ * so), POST /api/reload (see below), POST /api/probe-port-count
+ * (builds one throwaway stage instance from a {"type","config"} body
+ * and reports its out_port_count() - the web UI's only way to know how
+ * many handles a multi-port node needs, since that's an instance
+ * property, not something GET /api/stage-types' per-type listing can
+ * answer). CLAUDE.md's Phase 3 design sketch flagged live-reload-vs-
+ * restart as an open decision; this resolves it in favor of restart,
+ * deliberately - hot-swapping the running pipeline_chain would mean
+ * sharing it with epoch_barrier.c's worker-pool synchronization, which
+ * is real, correctness-critical, already-subtle code not worth
+ * destabilizing for this. "Restart" doesn't mean "the operator has to
+ * do it by hand" though: POST /api/reload triggers the exact same
+ * graceful shutdown SIGINT does (drain the ring, join every worker,
+ * tear down every stage, rte_eal_cleanup()), then main.c re-exec's
+ * itself into a fresh instance with the newly-saved graph - see
+ * main.c's own g_reload_requested comment for the full mechanism. Same
+ * PID throughout (no fork), so there's no parent process left to
+ * become a zombie, and no external supervisor is needed. Static files
  * out of --web-root (Phase 3's built web/dist/) round out the routes.
  * Same accept-loop-on-a-pthread shape as dpdk-app-example's
  * web_status.c (a small poll()-with-timeout loop, not a busy loop, so
@@ -69,8 +76,12 @@ void app_web_status_update(struct app_web_status *status, uint64_t records_in,
  * GET/POST /api/graph (501). Not copied either - main.c's copy must
  * outlive the server, and web_status.c mutates its current_graph_json
  * field in place on every successful save. */
+/* reload_flag: set alongside *quit_flag by POST /api/reload's handler -
+ * main.c consults it after the ordinary shutdown sequence completes to
+ * decide "re-exec a fresh instance" vs. "exit for good" (see
+ * main.c's own g_reload_requested comment). */
 int web_status_start(uint16_t web_port, struct app_web_status *status, volatile bool *quit_flag,
-		      const char *web_root, struct web_graph_ctx *graph_ctx);
+		      volatile bool *reload_flag, const char *web_root, struct web_graph_ctx *graph_ctx);
 void web_status_stop(void);
 
 #endif

@@ -6,6 +6,9 @@
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <errno.h>
+#include <dirent.h>
 #include <rte_eal.h>
 #include <rte_ring.h>
 #include <rte_cycles.h>
@@ -27,12 +30,134 @@
 #define STATUS_UPDATE_INTERVAL_US 500000
 
 static volatile bool g_shutdown_requested;
+/* Set only by POST /api/reload's handler (see web_status.c), alongside
+ * g_shutdown_requested - every thread that watches for shutdown (the
+ * worker lcores, the web server's own accept loop, main()'s own status
+ * loop below) only ever needs to know "stop now", never "stop because
+ * X" - g_shutdown_requested alone drives all of that, unchanged. This
+ * flag is consulted exactly once, at the very end of main(), after the
+ * ENTIRE ordinary shutdown sequence has already run to completion, to
+ * decide whether to actually exit(0) or re-exec into a fresh instance -
+ * see the bottom of main() below. */
+static volatile bool g_reload_requested;
 
 static void
 signal_handler(int signum)
 {
 	if (signum == SIGINT || signum == SIGTERM)
 		g_shutdown_requested = true;
+}
+
+/* EAL is given a chance to see --file-prefix/--huge-unlink already
+ * specified explicitly on the command line (an operator's own override
+ * always wins); when either is absent, this injects a default of
+ * --file-prefix=loomtabulator and --huge-unlink=existing, so this
+ * binary's own DPDK runtime/hugepage files:
+ *   (a) never collide with a completely different DPDK app sharing the
+ *       same host or container (this repo's own test suite included -
+ *       the default "rte" prefix means every app using it collides
+ *       with every other one that also doesn't override it), and
+ *   (b) never accumulate indefinitely across restarts - "existing"
+ *       mode has DPDK itself purge whatever a PREVIOUS, already-exited
+ *       run using this same prefix left behind (hugepage-backed
+ *       segment files are NOT unlinked by a clean rte_eal_cleanup() by
+ *       default - verified empirically: a stale hugepage file and a
+ *       stale /var/run/dpdk/<prefix>/ directory both survive a normal
+ *       clean SIGINT shutdown otherwise, growing without bound across
+ *       repeated restarts), the moment a NEW run starts - without
+ *       touching a CURRENTLY LIVE run's own multi-process files.
+ * Deliberately not --in-memory: that flag also avoids the file/hugepage
+ * footprint, but explicitly disables secondary-process attachment
+ * entirely, which this project needs (a DPDK secondary process
+ * attaching to the input ring is the whole Phase 4 chrontabulator
+ * integration plan - see ring_input.h). Skipped (both) if the caller
+ * already passed --no-huge - hugepages aren't in play at all then (see
+ * tests/test_pipeline_workers.c, which intentionally runs this way).
+ * The returned array is never freed - same "one-time alloc for the
+ * process's whole lifetime" shape as graph_config.c's read_whole_file(). */
+static char **
+build_eal_argv(int argc, char **argv, int *out_argc)
+{
+	int sep = argc;
+	bool has_file_prefix = false, has_huge_unlink = false, has_no_huge = false;
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "--") == 0) {
+			sep = i;
+			break;
+		}
+		if (strncmp(argv[i], "--file-prefix", 13) == 0)
+			has_file_prefix = true;
+		if (strncmp(argv[i], "--huge-unlink", 13) == 0)
+			has_huge_unlink = true;
+		if (strcmp(argv[i], "--no-huge") == 0)
+			has_no_huge = true;
+	}
+
+	int extra = 0;
+	if (!has_file_prefix)
+		extra++;
+	if (!has_huge_unlink && !has_no_huge)
+		extra++;
+	if (extra == 0) {
+		*out_argc = argc;
+		return argv;
+	}
+
+	char **new_argv = malloc((size_t)(argc + extra + 1) * sizeof(char *));
+	if (new_argv == NULL) {
+		*out_argc = argc;
+		return argv;
+	}
+
+	int n = 0;
+	for (int i = 0; i < sep; i++)
+		new_argv[n++] = argv[i];
+	if (!has_file_prefix)
+		new_argv[n++] = "--file-prefix=loomtabulator";
+	if (!has_huge_unlink && !has_no_huge)
+		new_argv[n++] = "--huge-unlink=existing";
+	for (int i = sep; i < argc; i++)
+		new_argv[n++] = argv[i];
+	new_argv[n] = NULL;
+
+	*out_argc = n;
+	return new_argv;
+}
+
+/* execv() preserves open file descriptors by default (only ones marked
+ * FD_CLOEXEC get closed) - by the time this is called, everything the
+ * APPLICATION layer opened has already been closed by the ordinary
+ * shutdown sequence (the web server's listening socket via
+ * web_status_stop(), every stage's own files/sockets via each
+ * teardown()), but rte_eal_cleanup() does not close every fd it opened
+ * internally for hugepage/memzone bookkeeping - empirically verified:
+ * without this, execv()-ing into a fresh instance fails immediately
+ * with "EAL: Cannot allocate memzone list" / "Cannot init memzone",
+ * because the fresh rte_eal_init() collides with its own predecessor's
+ * still-open (leaked across exec) fds for the exact same resources.
+ * Force-closing everything above stdio right before execv() is the
+ * standard fix for this class of problem in any self-re-exec daemon,
+ * not something specific to a bug in this project's own shutdown code -
+ * scans /proc/self/fd rather than looping 0..sysconf(_SC_OPEN_MAX)
+ * (which can be an enormous, mostly-empty range) for exactly the fds
+ * that actually exist. */
+static void
+close_fds_above_stdio(void)
+{
+	DIR *d = opendir("/proc/self/fd");
+	if (d == NULL)
+		return;
+
+	int dfd = dirfd(d);
+	struct dirent *entry;
+	while ((entry = readdir(d)) != NULL) {
+		char *endptr;
+		long fd = strtol(entry->d_name, &endptr, 10);
+		if (*endptr != '\0' || fd < 3 || fd == dfd)
+			continue;
+		close((int)fd);
+	}
+	closedir(d);
 }
 
 /* Reads path's raw bytes into a malloc'd, NUL-terminated buffer - just
@@ -175,11 +300,21 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 int
 main(int argc, char **argv)
 {
-	int eal_argc = rte_eal_init(argc, argv);
+	/* Untouched copy of exactly what this process was invoked with -
+	 * needed at the very bottom of main() to re-exec an identical fresh
+	 * instance on reload (see build_eal_argv() above for why it's NOT
+	 * this same array that gets passed to rte_eal_init() below). execv()
+	 * needs a NUL-terminated argv, which argv already is per the C
+	 * standard's own guarantee (argv[argc] == NULL). */
+	char **orig_argv = argv;
+
+	int eal_argv_count;
+	char **eal_argv = build_eal_argv(argc, argv, &eal_argv_count);
+	int eal_argc = rte_eal_init(eal_argv_count, eal_argv);
 	if (eal_argc < 0)
 		rte_exit(EXIT_FAILURE, "rte_eal_init failed: %s\n", rte_strerror(rte_errno));
-	argc -= eal_argc;
-	argv += eal_argc;
+	argc = eal_argv_count - eal_argc;
+	argv = eal_argv + eal_argc;
 
 	struct app_opts opts;
 	if (parse_args(argc, argv, &opts) != 0)
@@ -230,7 +365,8 @@ main(int argc, char **argv)
 				 "(status.json and the running pipeline are unaffected)\n", opts.graph_path);
 
 	if (opts.web_port != 0 &&
-	    web_status_start(opts.web_port, &status, &g_shutdown_requested, opts.web_root, &graph_ctx) == 0)
+	    web_status_start(opts.web_port, &status, &g_shutdown_requested, &g_reload_requested,
+			      opts.web_root, &graph_ctx) == 0)
 		printf("Status server listening on port %u\n", opts.web_port);
 
 	/* Off by default (see --testgen-enable) - the input ring is a real
@@ -332,5 +468,35 @@ main(int argc, char **argv)
 	       (uint64_t)atomic_load(&counters.records_forwarded));
 
 	rte_eal_cleanup();
+
+	if (g_reload_requested) {
+		/* execv(), not fork()+exec() - same PID throughout, so there's
+		 * no parent process left over to become a zombie, and no
+		 * external supervisor is needed to notice this process exited
+		 * and start a new one. Safe to do only here, after every fd
+		 * this process itself opened (the web server's listening
+		 * socket via web_status_stop() above, every stage's own
+		 * files/sockets via each teardown() above, the DPDK-owned
+		 * ring/hugepage state via rte_eal_cleanup() just above) has
+		 * already been released - the fresh instance re-runs this
+		 * exact same main() from the top, including re-reading
+		 * --graph=PATH, which is exactly what picks up whatever graph
+		 * is now saved there. orig_argv (captured before EAL or
+		 * getopt ever touched argv) is used here, not the trimmed
+		 * local argv - the new instance needs the FULL original
+		 * invocation (EAL args included), not just this process's own
+		 * app-level tail of it. /proc/self/exe (not orig_argv[0])
+		 * names the binary reliably regardless of how this process
+		 * was originally invoked (PATH lookup, a relative path, a
+		 * symlink) - execv() only returns on failure. */
+		printf("Reloading...\n");
+		fflush(NULL);
+		close_fds_above_stdio();
+		execv("/proc/self/exe", orig_argv);
+		fprintf(stderr, "loomtabulator: reload failed: exec() of /proc/self/exe failed: %s\n",
+			strerror(errno));
+		return 1;
+	}
+
 	return 0;
 }

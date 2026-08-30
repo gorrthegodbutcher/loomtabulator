@@ -27,7 +27,16 @@
  * ordinary heap memory is private to whichever process allocated it,
  * and mixing allocators (rte_malloc + free(), or malloc() + rte_free())
  * corrupts both heaps' bookkeeping, not just the one call that's
- * technically wrong. */
+ * technically wrong.
+ *
+ * A DPDK secondary process finds this ring (and the primary's memory
+ * layout generally) by matching file-prefix - main.c now defaults to
+ * --file-prefix=loomtabulator (see main.c's build_eal_argv() and
+ * README.md's "Usage" section) rather than DPDK's own "rte" default,
+ * so a secondary process's own invocation needs a matching
+ * --file-prefix=loomtabulator too, or it won't find this ring at all.
+ * A primary launched with its own explicit --file-prefix override
+ * needs secondaries to match THAT value instead, obviously. */
 struct rte_ring *ring_input_create(const char *name, unsigned int size);
 
 #endif
