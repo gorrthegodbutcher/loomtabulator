@@ -2,6 +2,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <rte_cycles.h>
+#include <rte_malloc.h>
 #include "testgen.h"
 #include "record.h"
 
@@ -19,7 +20,10 @@ put_be64(uint8_t *p, uint64_t v)
 static void
 emit_barrier(struct rte_ring *ring, uint64_t epoch_id)
 {
-	uint8_t *blob = malloc(sizeof(struct chrono_record_hdr));
+	/* rte_malloc(), not malloc() - see testgen_run()'s own comment on
+	 * why every ring item, barrier or data, uses the same allocator
+	 * pipeline_worker.c's consumer side frees with. */
+	uint8_t *blob = rte_malloc(NULL, sizeof(struct chrono_record_hdr), 0);
 	if (blob == NULL)
 		return; /* transient - the next barrier attempt will retry */
 
@@ -31,7 +35,7 @@ emit_barrier(struct rte_ring *ring, uint64_t epoch_id)
 	hdr->reserved = 0;
 
 	if (rte_ring_enqueue(ring, blob) != 0)
-		free(blob);
+		rte_free(blob);
 }
 
 void *
@@ -44,8 +48,18 @@ testgen_run(void *arg)
 	uint64_t interval_us = cfg->rate_per_sec != 0 ? 1000000ULL / cfg->rate_per_sec : 0;
 
 	while (!g_stop_requested && (cfg->count == 0 || sent < cfg->count)) {
+		/* rte_malloc(), not malloc() - a ring item's producer isn't
+		 * always this in-process thread (see ring_input.h's own
+		 * Phase 4 comment: a DPDK secondary process can enqueue
+		 * directly too), so every producer needs to agree on one
+		 * allocator with pipeline_worker.c's consumer side, which
+		 * frees every dequeued item unconditionally. rte_malloc()'s
+		 * hugepage-backed memory is also what makes a pointer placed
+		 * on the ring meaningful to a *different* process in the
+		 * first place - plain malloc() memory is private to whichever
+		 * process allocated it. */
 		size_t total = sizeof(struct chrono_record_hdr) + cfg->payload_len;
-		uint8_t *blob = malloc(total);
+		uint8_t *blob = rte_malloc(NULL, total, 0);
 		if (blob == NULL) {
 			/* Transient allocation pressure - back off briefly and
 			 * retry rather than treat this as fatal; testgen is a
@@ -73,8 +87,8 @@ testgen_run(void *arg)
 		put_be64(payload, sent);
 
 		if (rte_ring_enqueue(cfg->ring, blob) != 0)
-			free(blob); /* ring full - drop, same as any other
-				      * backpressure-drop in this project family */
+			rte_free(blob); /* ring full - drop, same as any other
+					   * backpressure-drop in this project family */
 
 		sent++;
 		since_last_barrier++;

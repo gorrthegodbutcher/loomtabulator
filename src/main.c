@@ -12,6 +12,7 @@
 #include <rte_errno.h>
 #include <rte_lcore.h>
 #include <rte_launch.h>
+#include <rte_malloc.h>
 
 #include "record.h"
 #include "ring_input.h"
@@ -73,6 +74,7 @@ struct app_opts {
 	uint16_t web_port;
 	const char *web_root;
 	const char *plugins_dir;
+	bool testgen_enabled; /* off by default - see --testgen-enable below */
 	uint32_t testgen_rate;
 	uint64_t testgen_count;
 	uint32_t testgen_payload_len;
@@ -101,7 +103,11 @@ usage(void)
 		"                      (EAL lcore count - 1). Must be <= that.\n"
 		"\n"
 		"  Synthetic input (stands in for chrontabulator's not-yet-built\n"
-		"  replay feature - see the project plan's Phase 4):\n"
+		"  replay feature - see the project plan's Phase 4) - off by default,\n"
+		"  so a real external producer (e.g. a DPDK secondary process\n"
+		"  attaching to this same ring) has sole control of the input ring\n"
+		"  unless you explicitly ask for synthetic traffic too:\n"
+		"  --testgen-enable    start the synthetic generator (default: off)\n"
 		"  --testgen-rate=N    records/sec, default 0 (as fast as possible)\n"
 		"  --testgen-count=N   records to send, default 0 (unlimited)\n"
 		"  --testgen-payload=N payload bytes per record, >= 8, default 16\n"
@@ -120,6 +126,7 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 		{"web-root", required_argument, 0, 'R'},
 		{"plugins-dir", required_argument, 0, 'P'},
 		{"workers", required_argument, 0, 'N'},
+		{"testgen-enable", no_argument, 0, 'e'},
 		{"testgen-rate", required_argument, 0, 'r'},
 		{"testgen-count", required_argument, 0, 'c'},
 		{"testgen-payload", required_argument, 0, 'p'},
@@ -136,13 +143,14 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 
 	optind = 1;
 	int opt;
-	while ((opt = getopt_long(argc, argv, "g:W:R:P:N:r:c:p:b:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "g:W:R:P:N:er:c:p:b:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'g': opts->graph_path = optarg; break;
 		case 'W': opts->web_port = (uint16_t)strtoul(optarg, NULL, 10); break;
 		case 'R': opts->web_root = optarg; break;
 		case 'P': opts->plugins_dir = optarg; break;
 		case 'N': opts->workers = (unsigned int)strtoul(optarg, NULL, 10); break;
+		case 'e': opts->testgen_enabled = true; break;
 		case 'r': opts->testgen_rate = (uint32_t)strtoul(optarg, NULL, 10); break;
 		case 'c': opts->testgen_count = strtoull(optarg, NULL, 10); break;
 		case 'p': opts->testgen_payload_len = (uint32_t)strtoul(optarg, NULL, 10); break;
@@ -225,6 +233,13 @@ main(int argc, char **argv)
 	    web_status_start(opts.web_port, &status, &g_shutdown_requested, opts.web_root, &graph_ctx) == 0)
 		printf("Status server listening on port %u\n", opts.web_port);
 
+	/* Off by default (see --testgen-enable) - the input ring is a real
+	 * external interface now (a DPDK secondary process can attach and
+	 * enqueue directly, same mechanism Phase 4's chrontabulator
+	 * integration will eventually use - see ring_input.h), and an
+	 * always-on synthetic generator competing with real traffic on
+	 * that same ring is exactly the kind of surprise a test session
+	 * feeding real data shouldn't have to work around. */
 	struct testgen_config tg_cfg = {
 		.ring = ring,
 		.rate_per_sec = opts.testgen_rate,
@@ -233,8 +248,12 @@ main(int argc, char **argv)
 		.barrier_every = opts.testgen_barrier_every,
 	};
 	pthread_t testgen_thread;
-	if (pthread_create(&testgen_thread, NULL, testgen_run, &tg_cfg) != 0)
-		rte_exit(EXIT_FAILURE, "failed to start testgen thread\n");
+	bool testgen_started = false;
+	if (opts.testgen_enabled) {
+		if (pthread_create(&testgen_thread, NULL, testgen_run, &tg_cfg) != 0)
+			rte_exit(EXIT_FAILURE, "failed to start testgen thread\n");
+		testgen_started = true;
+	}
 
 	struct pipeline_worker_ctx *worker_ctxs = calloc(n_workers, sizeof(*worker_ctxs));
 	if (worker_ctxs == NULL)
@@ -274,19 +293,23 @@ main(int argc, char **argv)
 	}
 
 	printf("\nShutting down...\n");
-	testgen_stop();
-	pthread_join(testgen_thread, NULL);
+	if (testgen_started) {
+		testgen_stop();
+		pthread_join(testgen_thread, NULL);
+	}
 
 	rte_eal_mp_wait_lcore();
 	free(worker_ctxs);
 
 	/* Drain anything left in the ring (data or barrier records - both
 	 * freed the same way at shutdown, no special case needed since the
-	 * epoch_barrier's final state no longer matters), so the malloc'd
-	 * blobs don't leak. */
+	 * epoch_barrier's final state no longer matters), so the rte_malloc'd
+	 * blobs don't leak. rte_free(), not free() - see pipeline_worker.c's
+	 * own comment on why every ring item, from any producer, is
+	 * rte_malloc()'d. */
 	void *leftover = NULL;
 	while (rte_ring_dequeue(ring, &leftover) == 0)
-		free(leftover);
+		rte_free(leftover);
 
 	web_status_stop();
 	app_web_status_destroy(&status);

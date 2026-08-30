@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <rte_eal.h>
 #include <rte_ring.h>
+#include <rte_malloc.h>
 #include "../src/record.h"
 #include "../src/pipeline.h"
 #include "../src/pipeline_worker.h"
@@ -95,7 +96,11 @@ producer_main(void *arg)
 
 	for (uint64_t e = 0; e < NUM_EPOCHS; e++) {
 		for (uint64_t s = 0; s < ITEMS_PER_EPOCH; s++) {
-			struct chrono_record_hdr *hdr = malloc(sizeof(*hdr));
+			/* rte_malloc(), not malloc() - pipeline_worker.c's
+			 * consumer side now calls rte_free() unconditionally
+			 * on every dequeued item (see ring_input.h's own
+			 * comment on why every producer must agree on this). */
+			struct chrono_record_hdr *hdr = rte_malloc(NULL, sizeof(*hdr), 0);
 			assert(hdr != NULL);
 			hdr->magic = CHRONO_RECORD_MAGIC;
 			hdr->seq = s;
@@ -106,7 +111,7 @@ producer_main(void *arg)
 				usleep(100); /* ring momentarily full - retry, don't drop */
 		}
 
-		struct chrono_record_hdr *barrier = malloc(sizeof(*barrier));
+		struct chrono_record_hdr *barrier = rte_malloc(NULL, sizeof(*barrier), 0);
 		assert(barrier != NULL);
 		barrier->magic = CHRONO_BARRIER_MAGIC;
 		barrier->seq = e;

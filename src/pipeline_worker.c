@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <rte_cycles.h>
+#include <rte_malloc.h>
 #include "pipeline_worker.h"
 #include "record.h"
 
@@ -34,7 +35,14 @@ pipeline_worker_lcore_main(void *arg)
 			if (ctx->on_record_processed != NULL)
 				ctx->on_record_processed(ctx->cb_arg, epoch, seq);
 		}
-		free(item);
+		/* rte_free(), not free() - every ring item, from any producer
+		 * (this process's own testgen.c thread, or a separate DPDK
+		 * process attached to this same ring - see ring_input.h's
+		 * Phase 4 comment), is rte_malloc()'d for exactly this
+		 * reason: only DPDK's own allocator can be trusted to free
+		 * memory that might have been allocated by a *different*
+		 * process than this one. */
+		rte_free(item);
 	}
 
 	return 0;
