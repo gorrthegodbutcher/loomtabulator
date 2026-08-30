@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include "dump_binary_stage.h"
 
 /* raw_record/wire_frame -> nothing (a leaf, see its plugin shim's
@@ -14,6 +15,12 @@
 
 struct dump_binary_config {
 	FILE *f;
+
+	/* Exposed via get_status() below - see stage.h's own comment on why
+	 * these need to be atomics (concurrent worker-lcore writers, a
+	 * main-lcore reader on a separate, much slower cadence). */
+	atomic_uint_least64_t records_written;
+	atomic_uint_least64_t bytes_written;
 };
 
 void *
@@ -32,6 +39,8 @@ dump_binary_stage_init(const struct json_value *config)
 		free(st);
 		return NULL;
 	}
+	atomic_init(&st->records_written, 0);
+	atomic_init(&st->bytes_written, 0);
 	return st;
 }
 
@@ -44,6 +53,8 @@ dump_binary_stage_process(void *state, const struct stage_record *in, struct sta
 	if (in->len > 0 && fwrite(in->data, 1, in->len, cfg->f) != in->len)
 		return (struct stage_result){ .ok = false, .drop_reason = "fwrite() failed" };
 
+	atomic_fetch_add_explicit(&cfg->records_written, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&cfg->bytes_written, in->len, memory_order_relaxed);
 	return (struct stage_result){ .ok = true };
 }
 
@@ -54,4 +65,15 @@ dump_binary_stage_teardown(void *state)
 	if (cfg != NULL)
 		fclose(cfg->f);
 	free(cfg);
+}
+
+void
+dump_binary_stage_get_status(void *state, struct stage_status *out)
+{
+	struct dump_binary_config *cfg = state;
+	out->field_count = 2;
+	snprintf(out->fields[0].name, STAGE_STATUS_NAME_MAX, "records_written");
+	out->fields[0].value = atomic_load_explicit(&cfg->records_written, memory_order_relaxed);
+	snprintf(out->fields[1].name, STAGE_STATUS_NAME_MAX, "bytes_written");
+	out->fields[1].value = atomic_load_explicit(&cfg->bytes_written, memory_order_relaxed);
 }

@@ -21,6 +21,7 @@ import {
   saveGraph,
   reloadGraph,
   waitForReload,
+  fetchStageStatuses,
   makeRingInputNode,
   probePortCount,
   colorForPortType,
@@ -28,8 +29,16 @@ import {
   RING_INPUT_NODE_ID,
   type StageNodeData,
   type GraphMeta,
+  type StageStatusEntry,
 } from "./graphApi";
 import { StageNode } from "./StageNode";
+import { StatusPanel } from "./StatusPanel";
+
+// How often to poll GET /api/stage-status - independent of (and much
+// more frequent than the extreme end of) the server's own
+// --status-poll-interval default of 2s; a poll landing between two
+// server-side updates just re-fetches the same snapshot, harmless.
+const STAGE_STATUS_POLL_MS = 3000;
 
 // Defined outside the component - React Flow warns (and pays a
 // re-render cost) if nodeTypes is a fresh object every render.
@@ -60,6 +69,8 @@ function App() {
   const [reloadStatus, setReloadStatus] = useState<
     { kind: "idle" | "reloading" | "ok" | "error"; message?: string }
   >({ kind: "idle" });
+  const [stageStatuses, setStageStatuses] = useState<Record<string, StageStatusEntry>>({});
+  const [statusPanelCollapsed, setStatusPanelCollapsed] = useState(false);
   const graphMeta = useRef<GraphMeta>(DEFAULT_META);
   const [graphApiEnabled, setGraphApiEnabled] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null);
@@ -94,6 +105,27 @@ function App() {
         nextNewNodeId = Math.max(nextNewNodeId, maxLoadedNewId + 1);
       })
       .catch((err) => setLoadError(String(err)));
+  }, []);
+
+  // Live per-stage status (GET /api/stage-status, ABI v6's struct
+  // stage.get_status()) - polled on a fixed client-side interval,
+  // independent of the server's own --status-poll-interval (a poll
+  // landing between two server-side updates just re-fetches the same
+  // snapshot). One immediate fetch on mount so the first real data
+  // doesn't wait a full interval; cleared on unmount.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      fetchStageStatuses().then((result) => {
+        if (!cancelled) setStageStatuses(result);
+      });
+    };
+    poll();
+    const id = setInterval(poll, STAGE_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   const onNodesChange = useCallback(
@@ -145,6 +177,7 @@ function App() {
           outPortCount,
           targetConnectedColor: null, // filled in by the useMemo below
           onInvalid: "drop", // default - see StageNodeData's own comment
+          liveStatus: null, // filled in by the poll below, once it ticks
         },
       },
     ]);
@@ -312,16 +345,20 @@ function App() {
   // real incoming edge (at most one - fan-in isn't supported), tint it
   // to match that edge's actual live type, same color coloredEdges
   // already gives the edge itself; StageNode.tsx falls back to a
-  // neutral color when this is null.
+  // neutral color when this is null. liveStatus rides along in the same
+  // pass, for the same reason - both are render-time augmentations of
+  // `data`, never fed back into `nodes` state itself, so there's no risk
+  // of either going stale or leaking into what saveGraph() sends.
   const nodesWithTargetColor = useMemo(
     () =>
       nodes.map((n) => {
         const incoming = edges.find((e) => e.target === n.id);
         const sourceNode = incoming ? nodes.find((sn) => sn.id === incoming.source) : undefined;
         const targetConnectedColor = sourceNode ? colorForPortType(sourceNode.data.outType) : null;
-        return { ...n, data: { ...n.data, targetConnectedColor } };
+        const liveStatus = stageStatuses[n.id] ?? null;
+        return { ...n, data: { ...n.data, targetConnectedColor, liveStatus } };
       }),
-    [nodes, edges],
+    [nodes, edges, stageStatuses],
   );
 
   return (
@@ -427,6 +464,11 @@ function App() {
           />
         </ReactFlow>
       </main>
+      <StatusPanel
+        nodes={nodesWithTargetColor}
+        collapsed={statusPanelCollapsed}
+        onToggleCollapsed={() => setStatusPanelCollapsed((c) => !c)}
+      />
 
       {contextMenu && (
         <>

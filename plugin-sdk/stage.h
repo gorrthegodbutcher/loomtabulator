@@ -23,6 +23,38 @@
  * author needs to know, not an internal engine detail. */
 #define STAGE_MAX_OUT_PORTS 16
 
+/* Structural caps on struct stage.get_status()'s output - array/string
+ * sizing (see struct stage_status below), not a real limit on how much
+ * a stage could conceivably want to report; bump if a real plugin needs
+ * more. */
+#define STAGE_MAX_STATUS_FIELDS 8
+#define STAGE_STATUS_NAME_MAX 32
+
+/* One named counter a stage reports via get_status() below - e.g.
+ * {"records_checked", 1042}. Fixed-size name (not a pointer) so this
+ * struct is fully self-contained and safely copyable by value across
+ * the ABI boundary, with no lifetime/ownership question the way a
+ * returned string pointer would raise - same discipline struct
+ * stage_record/struct stage_result already use. */
+struct stage_status_field {
+	char name[STAGE_STATUS_NAME_MAX];
+	uint64_t value;
+};
+
+/* A stage instance's current status snapshot - see struct stage's own
+ * get_status comment for when/how this gets filled. field_count == 0
+ * is a completely normal answer (this stage has nothing to report right
+ * now, or ever), not an error. Values are plain counters (uint64) for
+ * now - deliberately not a richer typed value (a string state, a float
+ * average): every example this was designed against (total/passed/
+ * failed message counts) is a counter, and widening to other types
+ * later is a small additive change if a real need shows up, not
+ * something worth building speculatively today. */
+struct stage_status {
+	struct stage_status_field fields[STAGE_MAX_STATUS_FIELDS];
+	unsigned field_count;
+};
+
 /* Turns an enum stage_port_type value into its bit for struct
  * stage.in_types below - a stage accepting several input types ORs
  * these together (e.g. PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) |
@@ -271,6 +303,30 @@ struct stage {
 	 * be handled gracefully - not every stage needs teardown, but every
 	 * stage struct has the pointer for uniformity. */
 	void (*teardown)(void *state);
+
+	/* Optional - NULL (the right default for most stages) means "this
+	 * stage has nothing to report." Called periodically - every
+	 * --status-poll-interval (default 2s, see main.c), NEVER per-record
+	 * - from the process's MAIN lcore only, never a worker lcore, and
+	 * never anywhere on the hot path (see pipeline.c/pipeline_worker.c,
+	 * neither of which calls this). Fills *out (the caller
+	 * zero-initializes it first, same ABI-level guarantee process()'s
+	 * own *out gets) with whatever named counters this instance wants
+	 * to expose right now - see struct stage_status above.
+	 *
+	 * A single node instance's state is already shared and concurrently
+	 * WRITTEN by every worker lcore that ever routes a record to it
+	 * (this is not new - see this struct's own top comment, and
+	 * forward_udp_stage.c's shared-socket precedent for the same
+	 * concurrency shape) - this callback then READS that same state
+	 * from a completely different thread (the main lcore). Any counter
+	 * exposed here needs to be updated with atomics in process()
+	 * (atomic_fetch_add_explicit(..., memory_order_relaxed) is the
+	 * existing convention - see pipeline_counters in pipeline.h) and
+	 * read the same way here (atomic_load_explicit). Must not block -
+	 * this runs on the same thread that also drives the status-server
+	 * update loop and the shutdown poll. */
+	void (*get_status)(void *state, struct stage_status *out);
 };
 
 #endif

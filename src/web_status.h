@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <time.h>
 #include <pthread.h>
+#include "pipeline.h"
 
 /* Status/API server: GET /status.json, GET /api/stage-types (Phase 3 -
  * serializes plugin_loader.c's dynamically-populated registry for the
@@ -13,7 +14,9 @@
  * for the UI to load on open), POST /api/graph (validates a new graph
  * exactly as startup does and, on success, writes it to --graph=PATH's
  * file - it does NOT hot-swap the running pipeline; the response says
- * so), POST /api/reload (see below), POST /api/probe-port-count
+ * so), POST /api/reload (see below), GET /api/stage-status (each
+ * node's live struct stage.get_status() snapshot, if it has one - see
+ * struct stage_status_snapshot below), POST /api/probe-port-count
  * (builds one throwaway stage instance from a {"type","config"} body
  * and reports its out_port_count() - the web UI's only way to know how
  * many handles a multi-port node needs, since that's an instance
@@ -36,12 +39,35 @@
  * web_status.c (a small poll()-with-timeout loop, not a busy loop, so
  * it notices shutdown promptly without blocking indefinitely in
  * accept()). */
+/* One node instance's status.h struct stage_status, plus enough to
+ * identify which node/stage type it came from for GET /api/stage-status'
+ * JSON - see app_web_status_update_stage_statuses() below for how this
+ * gets filled. status.field_count == 0 means this stage either has no
+ * get_status() at all, or has one that currently reports nothing -
+ * both are normal, not errors. */
+struct stage_status_snapshot {
+	const char *node_id;
+	const char *stage_type;
+	struct stage_status status;
+};
+
 struct app_web_status {
 	time_t start_time;
 	pthread_mutex_t lock;
 	uint64_t records_in;
 	uint64_t records_dropped;
 	uint64_t records_forwarded;
+
+	/* Filled periodically by app_web_status_update_stage_statuses()
+	 * below (main.c calls it on its own, slower --status-poll-interval
+	 * cadence, separate from the records_in/dropped/forwarded update
+	 * above) - GET /api/stage-status serves exactly this, under the
+	 * same lock. Indexed 0..stage_status_count, not by chain position -
+	 * a stage_status_count of 0 just means the collector hasn't run yet
+	 * (e.g. right at startup, before the first --status-poll-interval
+	 * tick). */
+	struct stage_status_snapshot stage_statuses[PIPELINE_MAX_STAGES];
+	size_t stage_status_count;
 };
 
 /* Everything GET/POST /api/graph need: where to write a validated graph
@@ -66,6 +92,18 @@ void app_web_status_destroy(struct app_web_status *status);
  * there's no lock contention on the datapath). */
 void app_web_status_update(struct app_web_status *status, uint64_t records_in,
 			    uint64_t records_dropped, uint64_t records_forwarded);
+
+/* Calls chain->stages[i].stage->get_status() for every node that has
+ * one (leaves stage_statuses[i].status.field_count at 0 for a node that
+ * doesn't) and stores the results under status->lock, for
+ * GET /api/stage-status to serve. Called from main.c's own status loop
+ * on its own --status-poll-interval cadence (default 2s -
+ * deliberately much slower than the records_in/dropped/forwarded
+ * update above, since this is explicitly not a hot-path concern - see
+ * struct stage.get_status's own comment in stage.h), never from a
+ * worker lcore. */
+void app_web_status_update_stage_statuses(struct app_web_status *status,
+					   const struct pipeline_chain *chain);
 
 /* web_root: directory holding the built web/dist/ (Phase 3 UI) to serve
  * as static files, or NULL/"" to disable static-file serving (status.json

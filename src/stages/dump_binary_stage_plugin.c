@@ -23,6 +23,7 @@ static const struct stage g_stage = {
 	.out_port_count = dump_binary_out_port_count,
 	.process = dump_binary_stage_process,
 	.teardown = dump_binary_stage_teardown,
+	.get_status = dump_binary_stage_get_status,
 };
 
 uint32_t

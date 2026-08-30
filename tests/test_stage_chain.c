@@ -382,6 +382,62 @@ build_record(uint8_t *buf, uint64_t magic, uint64_t raw_value, uint32_t payload_
 	}
 }
 
+/* struct stage.get_status() (ABI v6) - exercises both reference
+ * implementations directly: a few process() calls (mixing good and
+ * bad-magic records for validate, a couple of writes for dump_binary),
+ * then get_status() confirms the counters it reports match exactly. */
+static void
+run_get_status_test(void)
+{
+	struct json_value *validate_cfg = parse_or_die("{\"require_magic\": true}");
+	void *validate_state = validate_stage_init(validate_cfg);
+	assert(validate_state != NULL);
+
+	uint8_t good[64], bad[64];
+	build_record(good, CHRONO_RECORD_MAGIC, 1, 16);
+	build_record(bad, 0xdeadbeef, 1, 16);
+	uint8_t out_buf[256];
+	struct stage_record out = { .data = out_buf };
+
+	struct stage_record good_in = { .data = good, .len = sizeof(struct chrono_record_hdr) + 16 };
+	struct stage_record bad_in = { .data = bad, .len = sizeof(struct chrono_record_hdr) + 16 };
+	assert(validate_stage_process(validate_state, &good_in, &out).ok);
+	assert(validate_stage_process(validate_state, &good_in, &out).ok);
+	assert(validate_stage_process(validate_state, &bad_in, &out).ok);
+
+	struct stage_status vstatus = {0};
+	validate_stage_get_status(validate_state, &vstatus);
+	assert(vstatus.field_count == 2);
+	assert(strcmp(vstatus.fields[0].name, "records_checked") == 0);
+	assert(vstatus.fields[0].value == 3);
+	assert(strcmp(vstatus.fields[1].name, "records_flagged") == 0);
+	assert(vstatus.fields[1].value == 1);
+	printf("PASS: validate_stage_get_status() reports records_checked/records_flagged correctly\n");
+	validate_stage_teardown(validate_state);
+
+	struct json_value *binary_cfg = parse_or_die("{\"path\": \"build/test_get_status.bin\"}");
+	void *binary_state = dump_binary_stage_init(binary_cfg);
+	assert(binary_state != NULL);
+
+	uint8_t chunk1[3] = { 1, 2, 3 };
+	uint8_t chunk2[5] = { 4, 5, 6, 7, 8 };
+	struct stage_record bin_in1 = { .data = chunk1, .len = sizeof(chunk1) };
+	struct stage_record bin_in2 = { .data = chunk2, .len = sizeof(chunk2) };
+	struct stage_record bin_out = {0};
+	assert(dump_binary_stage_process(binary_state, &bin_in1, &bin_out).ok);
+	assert(dump_binary_stage_process(binary_state, &bin_in2, &bin_out).ok);
+
+	struct stage_status bstatus = {0};
+	dump_binary_stage_get_status(binary_state, &bstatus);
+	assert(bstatus.field_count == 2);
+	assert(strcmp(bstatus.fields[0].name, "records_written") == 0);
+	assert(bstatus.fields[0].value == 2);
+	assert(strcmp(bstatus.fields[1].name, "bytes_written") == 0);
+	assert(bstatus.fields[1].value == 8);
+	printf("PASS: dump_binary_stage_get_status() reports records_written/bytes_written correctly\n");
+	dump_binary_stage_teardown(binary_state);
+}
+
 int
 main(void)
 {
@@ -504,6 +560,7 @@ main(void)
 	run_routing_test();
 	run_invalid_routing_test();
 	run_dump_stage_tests();
+	run_get_status_test();
 
 	printf("\nALL TESTS PASSED\n");
 	return 0;

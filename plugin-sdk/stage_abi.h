@@ -110,8 +110,29 @@
  * This is an engine-internal addition (struct pipeline_stage_instance,
  * pipeline.h) - it does NOT touch struct stage/stage_record/
  * stage_result's layout, so it isn't independently why this is a new
- * ABI version; the enum shrink is. */
-#define STAGE_ABI_VERSION 5u
+ * ABI version; the enum shrink is.
+ *
+ * Version 6 (current): added struct stage.get_status(state, out) - an
+ * optional callback (NULL, the default, means "nothing to report") a
+ * stage instance uses to expose its own named counters (e.g.
+ * "records_checked", "records_flagged") for the web UI to display,
+ * polled at a slow (--status-poll-interval, default 2s - not a
+ * hot-path concern) cadence from main.c's own status loop, never from
+ * a worker lcore. See struct stage_status/struct stage_status_field
+ * (stage.h) for the fixed-size, pointer-free shape this reports
+ * through - deliberately not a returned string (no lifetime/ownership
+ * question crossing the ABI boundary) and deliberately counters-only
+ * for now (uint64), not a richer typed value - every example this was
+ * designed against is a counter, and widening later is a small,
+ * additive change if a real need shows up. Since a node instance's
+ * state is already concurrently written by every worker lcore that
+ * routes a record to it, any stage implementing this needs atomics for
+ * whatever it exposes - see get_status's own comment in stage.h. Every
+ * existing stage (built-in or third-party) simply leaves this NULL by
+ * default via C's own designated-initializer zero-fill, so this bump
+ * needs a rebuild but no source change unless a stage author actually
+ * wants to opt in. */
+#define STAGE_ABI_VERSION 6u
 
 #define STAGE_ABI_VERSION_SYMBOL "loom_stage_abi_version"
 #define STAGE_ABI_ENTRY_SYMBOL   "loom_stage_entry"

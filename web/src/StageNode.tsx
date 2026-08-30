@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Handle, Position, useUpdateNodeInternals, type NodeProps, type Node } from "@xyflow/react";
-import { colorForPortType, INVALID_HANDLE_ID, type StageNodeData } from "./graphApi";
+import { colorForPortType, formatStatusValue, INVALID_HANDLE_ID, type StageNodeData } from "./graphApi";
 
 /* Custom node type, replacing React Flow's default one everywhere in
  * App.tsx - the default type only ever renders a single unnamed source
@@ -22,7 +22,12 @@ import { colorForPortType, INVALID_HANDLE_ID, type StageNodeData } from "./graph
  * entirely from the node's own `style` prop (STAGE_NODE_STYLE in
  * graphApi.ts) - React Flow applies `style` to every node's wrapper
  * regardless of node type, so this component only needs to render the
- * label text and the handles themselves. */
+ * label text and the handles themselves. The label also carries a
+ * native `title` tooltip built from the node's live
+ * struct stage.get_status() fields when it has any (see
+ * data.liveStatus's own comment) - the fast, no-new-component path for
+ * "hover a stage to see its status"; StatusPanel.tsx is the persistent,
+ * always-refreshing counterpart for watching several stages at once. */
 export function StageNode({ id, data }: NodeProps<Node<StageNodeData>>) {
   const portCount = Math.max(1, data.outPortCount ?? 1);
   const hasTarget = data.inTypes.length > 0; // the synthetic ring-input node
@@ -61,6 +66,15 @@ export function StageNode({ id, data }: NodeProps<Node<StageNodeData>>) {
   // for the full version-5 mechanism this wires into.
   const invalidColor = "#f43f5e";
 
+  // Native multi-line tooltip (via \n) built from the periodic
+  // GET /api/stage-status poll (App.tsx) - see graphApi.ts's
+  // StageNodeData.liveStatus comment. undefined (not an empty string)
+  // when there's nothing to report, so hovering a node with no status
+  // behaves exactly as before this feature existed - no empty tooltip.
+  const statusTitle = data.liveStatus?.fields.length
+    ? data.liveStatus.fields.map((f) => `${f.name}: ${formatStatusValue(f)}`).join("\n")
+    : undefined;
+
   return (
     <>
       {hasTarget && (
@@ -71,7 +85,7 @@ export function StageNode({ id, data }: NodeProps<Node<StageNodeData>>) {
           style={{ background: targetColor, borderColor: targetColor }}
         />
       )}
-      <div>{data.label}</div>
+      <div title={statusTitle}>{data.label}</div>
       {Array.from({ length: portCount }, (_, k) => (
         <Handle
           key={k}

@@ -186,6 +186,46 @@ writes any routing logic for this - set the bit, and the graph handles
 the rest. `in->type` is completely unaffected either way: a flagged
 record is still the exact same `out_type` shape, just judged bad.
 
+## Optional: reporting status
+
+`struct stage.get_status(state, out)` is an optional callback (since
+`STAGE_ABI_VERSION` 6) a stage instance uses to expose its own named
+counters - e.g. `{"records_checked", 1042}` - for the web UI to
+display. `NULL` (the default - leave the field out of your `g_stage`
+initializer entirely) means "nothing to report," which is what most
+stages should do. Fill `*out` (arrives zero-initialized, same
+guarantee `process()`'s own `*out` gets) with up to
+`STAGE_MAX_STATUS_FIELDS` named `uint64_t` counters:
+
+```c
+static void
+my_stage_get_status(void *state, struct stage_status *out)
+{
+	struct my_state *st = state;
+	out->field_count = 1;
+	snprintf(out->fields[0].name, STAGE_STATUS_NAME_MAX, "records_seen");
+	out->fields[0].value = atomic_load_explicit(&st->records_seen, memory_order_relaxed);
+}
+```
+
+Called periodically - every `--status-poll-interval` (default 2s;
+deliberately slow, not a hot-path concern) - from loomtabulator's main
+lcore, **never** a worker lcore and never on the hot path. This matters
+because a single node instance's state is already shared and
+concurrently *written* by every worker lcore that routes a record to
+it (same shape as this file's "one shared socket, many threads"
+pattern for `process()` itself) - `get_status()` then *reads* that same
+state from a different thread entirely. Any counter you expose this way
+needs to be updated with atomics in `process()`
+(`atomic_fetch_add_explicit(&st->records_seen, 1, memory_order_relaxed)`
+is the convention) and read the same way here
+(`atomic_load_explicit`) - an ordinary `uint64_t` read/write pair here
+would be a real data race. `get_status()` itself must never block.
+
+Values are plain counters (`uint64_t`) only for now, not a richer typed
+value (a string state, a float average) - every real use case so far is
+a counter, and widening later is a small, additive change if one isn't.
+
 ## Build rules
 
 - **No bitfields, no `#pragma pack`** on anything in `struct stage`,

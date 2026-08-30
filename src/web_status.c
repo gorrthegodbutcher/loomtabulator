@@ -66,6 +66,31 @@ app_web_status_update(struct app_web_status *status, uint64_t records_in,
 	pthread_mutex_unlock(&status->lock);
 }
 
+void
+app_web_status_update_stage_statuses(struct app_web_status *status,
+				      const struct pipeline_chain *chain)
+{
+	/* Cheap enough (<= PIPELINE_MAX_STAGES stages, a few in-memory
+	 * struct copies, no I/O - get_status() itself must not block, see
+	 * stage.h's own comment) to just do the whole collection pass
+	 * directly under the lock, same simple shape as
+	 * app_web_status_update() above - no separate double-buffer needed
+	 * for something this infrequent (--status-poll-interval, default
+	 * 2s) and this cheap. */
+	pthread_mutex_lock(&status->lock);
+	status->stage_status_count = chain->stage_count;
+	for (size_t i = 0; i < chain->stage_count; i++) {
+		const struct pipeline_stage_instance *inst = &chain->stages[i];
+		status->stage_statuses[i].node_id = inst->node_id;
+		status->stage_statuses[i].stage_type = inst->stage->name;
+		if (inst->stage->get_status != NULL)
+			inst->stage->get_status(inst->state, &status->stage_statuses[i].status);
+		else
+			status->stage_statuses[i].status.field_count = 0;
+	}
+	pthread_mutex_unlock(&status->lock);
+}
+
 struct http_request {
 	char method[8];
 	char path[256];
@@ -279,6 +304,70 @@ json_escape_append(char *dst, size_t dst_size, size_t *off, const char *src)
 		dst[(*off)++] = *src;
 	}
 	dst[*off] = '\0';
+}
+
+/* GET /api/stage-status: struct app_web_status.stage_statuses[], filled
+ * periodically by app_web_status_update_stage_statuses() (called from
+ * main.c's own slow --status-poll-interval loop, never per-record) -
+ * see stage.h's struct stage.get_status comment for the full mechanism.
+ * node_id/stage_type/field names are escaped (json_escape_append()
+ * above) since node_id and field names both ultimately come from
+ * user-authored content (the graph JSON's own node ids, and whatever a
+ * third-party plugin's get_status() reports) - same defensive posture
+ * handle_post_graph() already takes with graph_config.c's own error
+ * strings. */
+static void
+handle_stage_status(int fd, struct app_web_status *status)
+{
+	char json[STAGE_TYPES_JSON_BUF_SIZE];
+	size_t off = 0;
+
+	pthread_mutex_lock(&status->lock);
+	int n = snprintf(json, sizeof(json), "[\n");
+	if (n > 0)
+		off = (size_t)n;
+
+	for (size_t i = 0; i < status->stage_status_count && off + 2 < sizeof(json); i++) {
+		const struct stage_status_snapshot *snap = &status->stage_statuses[i];
+
+		n = snprintf(json + off, sizeof(json) - off, "  { \"node_id\": \"");
+		if (n > 0)
+			off += (size_t)n;
+		json_escape_append(json, sizeof(json), &off, snap->node_id);
+		n = snprintf(json + off, sizeof(json) - off, "\", \"type\": \"");
+		if (n > 0)
+			off += (size_t)n;
+		json_escape_append(json, sizeof(json), &off, snap->stage_type);
+		n = snprintf(json + off, sizeof(json) - off, "\", \"fields\": [");
+		if (n > 0)
+			off += (size_t)n;
+
+		for (unsigned f = 0; f < snap->status.field_count && off + 2 < sizeof(json); f++) {
+			n = snprintf(json + off, sizeof(json) - off, "%s{ \"name\": \"",
+				      f > 0 ? ", " : "");
+			if (n > 0)
+				off += (size_t)n;
+			json_escape_append(json, sizeof(json), &off, snap->status.fields[f].name);
+			n = snprintf(json + off, sizeof(json) - off, "\", \"value\": %" PRIu64 " }",
+				      snap->status.fields[f].value);
+			if (n > 0)
+				off += (size_t)n;
+		}
+
+		n = snprintf(json + off, sizeof(json) - off, "] }%s\n",
+			      i + 1 < status->stage_status_count ? "," : "");
+		if (n > 0)
+			off += (size_t)n;
+	}
+	pthread_mutex_unlock(&status->lock);
+
+	if (off < sizeof(json)) {
+		n = snprintf(json + off, sizeof(json) - off, "]\n");
+		if (n > 0)
+			off += (size_t)n;
+	}
+
+	send_response(fd, "200 OK", "application/json", json);
 }
 
 /* POST /api/graph: validates the uploaded graph exactly as
@@ -558,6 +647,8 @@ handle_connection(int fd, struct app_web_status *status, const char *web_root,
 		handle_stage_types(fd);
 	} else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/api/graph") == 0) {
 		handle_get_graph(fd, graph_ctx);
+	} else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/api/stage-status") == 0) {
+		handle_stage_status(fd, status);
 	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/graph") == 0) {
 		handle_post_graph(fd, req.body != NULL ? req.body : "", req.body_len, graph_ctx);
 	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/reload") == 0) {
