@@ -1,5 +1,5 @@
 import type { Node } from "@xyflow/react";
-import type { StageNodeData } from "./graphApi";
+import { formatStatusValue, type StageNodeData } from "./graphApi";
 
 interface StatusPanelProps {
   nodes: Node<StageNodeData>[];
@@ -77,7 +77,7 @@ export function StatusPanel({ nodes, collapsed, onToggleCollapsed }: StatusPanel
                   }}
                 >
                   <span>{f.name}</span>
-                  <span>{f.value.toLocaleString()}</span>
+                  <span title={f.value.toLocaleString()}>{formatStatusValue(f)}</span>
                 </div>
               ))}
             </div>

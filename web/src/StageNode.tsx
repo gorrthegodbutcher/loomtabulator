@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Handle, Position, useUpdateNodeInternals, type NodeProps, type Node } from "@xyflow/react";
-import { colorForPortType, INVALID_HANDLE_ID, type StageNodeData } from "./graphApi";
+import { colorForPortType, formatStatusValue, INVALID_HANDLE_ID, type StageNodeData } from "./graphApi";
 
 /* Custom node type, replacing React Flow's default one everywhere in
  * App.tsx - the default type only ever renders a single unnamed source
@@ -72,7 +72,7 @@ export function StageNode({ id, data }: NodeProps<Node<StageNodeData>>) {
   // when there's nothing to report, so hovering a node with no status
   // behaves exactly as before this feature existed - no empty tooltip.
   const statusTitle = data.liveStatus?.fields.length
-    ? data.liveStatus.fields.map((f) => `${f.name}: ${f.value}`).join("\n")
+    ? data.liveStatus.fields.map((f) => `${f.name}: ${formatStatusValue(f)}`).join("\n")
     : undefined;
 
   return (

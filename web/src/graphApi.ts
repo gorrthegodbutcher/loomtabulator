@@ -84,6 +84,52 @@ export interface StageStatusEntry {
   fields: StageStatusField[];
 }
 
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+// bytes_written can run up to ~1000 TB - raw digit counts that long are
+// unreadable at a glance, so scale to whichever unit keeps the number
+// under 1024 (the conventional "1 KB = 1024 B" binary scaling most
+// dashboards use, not the strict SI "1 KB = 1000 B").
+function formatByteSize(value: number): string {
+  let v = value;
+  let i = 0;
+  while (v >= 1024 && i < BYTE_UNITS.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 2)} ${BYTE_UNITS[i]}`;
+}
+
+const ENGINEERING_UNITS: [number, string][] = [
+  [1e12, "T"],
+  [1e9, "B"],
+  [1e6, "M"],
+  [1e3, "K"],
+];
+
+// Plain counters (records_checked, records_flagged, ...) can run up to
+// the trillions - same "scale to a readable magnitude" idea as
+// formatByteSize, but with engineering-notation suffixes (K/M/B/T)
+// instead of byte units.
+function formatEngineering(value: number): string {
+  for (const [threshold, suffix] of ENGINEERING_UNITS) {
+    if (value >= threshold) return `${(value / threshold).toFixed(2)}${suffix}`;
+  }
+  return value.toLocaleString();
+}
+
+// Shared by StageNode.tsx's hover tooltip and StatusPanel.tsx's table,
+// so both surfaces always format the same field the same way. Decided
+// purely by the field's own name - not a backend/ABI concept, just a
+// display convention - since struct stage_status_field carries no
+// "this is a byte count" flag: any field whose name contains "bytes"
+// (case-insensitive - "bytes_written", "total_bytes", etc.) gets
+// MB/GB/TB-style formatting, everything else gets K/M/B/T
+// engineering notation.
+export function formatStatusValue(field: StageStatusField): string {
+  return /bytes/i.test(field.name) ? formatByteSize(field.value) : formatEngineering(field.value);
+}
+
 interface RawGraphNode {
   id: string;
   type: string;
