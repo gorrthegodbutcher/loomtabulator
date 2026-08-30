@@ -2,13 +2,19 @@
 #include <stdlib.h>
 #include "convert_stage.h"
 
-/* PORT_TYPE_EXTRACTED -> PORT_TYPE_ENGINEERING. The classic DAQ/telemetry
+/* PORT_TYPE_RAW_RECORD -> PORT_TYPE_ENGINEERING. The classic DAQ/telemetry
  * "raw counts to engineering units" linear calibration:
  * engineering = raw * scale + offset. Anything more elaborate
  * (piecewise, polynomial, lookup-table calibration curves) is a
  * different future stage type, not a config option bolted onto this
  * one - keeps this stage's config schema (and its web-UI-editable form,
- * once Phase 3 exists) simple and obvious. */
+ * once Phase 3 exists) simple and obvious.
+ *
+ * The type system no longer distinguishes "raw bytes" from "extract's
+ * numeric-mode output" (both are just PORT_TYPE_RAW_RECORD - see
+ * stage.h's enum comment) - this stage's own runtime len==8 check below
+ * is what actually enforces "did extract's numeric mode really run
+ * first," not graph-time type validation. */
 
 struct convert_config {
 	double scale;
@@ -51,10 +57,9 @@ convert_stage_process(void *state, const struct stage_record *in, struct stage_r
 	 * opaque double bit pattern, not yet encoded for any particular
 	 * destination. forward_udp doesn't accept PORT_TYPE_ENGINEERING at
 	 * all (a double isn't just an opaque byte blob the way
-	 * raw_record/validated/extracted are - see forward_udp_stage.c's
-	 * own header comment); dump_text_stage.c is the built-in consumer
-	 * that knows how to turn this into a specific on-disk encoding
-	 * (ASCII text). */
+	 * raw_record is - see forward_udp_stage.c's own header comment);
+	 * dump_text_stage.c is the built-in consumer that knows how to turn
+	 * this into a specific on-disk encoding (ASCII text). */
 	memcpy(out->data, &engineering, sizeof(engineering));
 	out->type = PORT_TYPE_ENGINEERING;
 	out->len = sizeof(engineering);

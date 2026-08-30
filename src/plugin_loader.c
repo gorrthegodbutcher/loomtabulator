@@ -47,8 +47,6 @@ stage_port_type_name(enum stage_port_type type)
 {
 	switch (type) {
 	case PORT_TYPE_RAW_RECORD:  return "raw_record";
-	case PORT_TYPE_VALIDATED:   return "validated";
-	case PORT_TYPE_EXTRACTED:   return "extracted";
 	case PORT_TYPE_ENGINEERING: return "engineering";
 	case PORT_TYPE_WIRE_FRAME:  return "wire_frame";
 	default:                    return "unknown";

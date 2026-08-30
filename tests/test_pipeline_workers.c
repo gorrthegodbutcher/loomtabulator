@@ -41,7 +41,7 @@ identity_process(void *state, const struct stage_record *in, struct stage_record
 {
 	(void)state;
 	memcpy(out->data, in->data, in->len);
-	out->type = PORT_TYPE_VALIDATED;
+	out->type = PORT_TYPE_RAW_RECORD;
 	out->len = in->len;
 	out->capture_tsc = in->capture_tsc;
 	return (struct stage_result){ .ok = true };
@@ -50,7 +50,7 @@ identity_process(void *state, const struct stage_record *in, struct stage_record
 static const struct stage g_identity_stage = {
 	.name = "identity",
 	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
-	.out_type = PORT_TYPE_VALIDATED,
+	.out_type = PORT_TYPE_RAW_RECORD,
 	.init = NULL,
 	.process = identity_process,
 	.teardown = NULL,

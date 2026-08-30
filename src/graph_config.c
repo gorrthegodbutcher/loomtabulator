@@ -27,6 +27,17 @@ struct node_info {
 					      (in_degree <= 1 is enforced
 					      below) to that parent's
 					      out_type. */
+
+	/* Where a record THIS node flags invalid (STAGE_RECORD_FLAG_
+	 * INTEGRITY_FAILED - see stage.h) goes, independent of
+	 * port_target[]/out_port entirely - see pipeline.h's struct
+	 * pipeline_stage_instance comment for the full mechanism.
+	 * invalid_target: index into nodes[] that this node's one optional
+	 * "invalid_target": true edge points to, -1 if none. pass_invalid:
+	 * this node's "on_invalid" ("drop"/"pass", default "drop"),
+	 * consulted only when invalid_target == -1. */
+	int invalid_target;
+	bool pass_invalid;
 };
 
 static char *
@@ -75,10 +86,10 @@ find_node_idx(struct node_info *nodes, size_t count, const char *id, size_t *out
 }
 
 /* Renders in_types' set bits as a human-readable comma list (e.g.
- * "raw_record, validated, extracted") for an edge-mismatch error
- * message - reuses stage_port_type_name() (plugin_loader.h) rather
- * than hardcoding names here too. Iterates the enum's known sequential
- * range (PORT_TYPE_RAW_RECORD..PORT_TYPE_WIRE_FRAME); update this if
+ * "raw_record, wire_frame") for an edge-mismatch error message - reuses
+ * stage_port_type_name() (plugin_loader.h) rather than hardcoding names
+ * here too. Iterates the enum's known sequential range
+ * (PORT_TYPE_RAW_RECORD..PORT_TYPE_WIRE_FRAME); update this if
  * stage_port_type ever gains a non-sequential value. */
 static void
 describe_accepted_types(unsigned in_types, char *buf, size_t buf_len)
@@ -141,8 +152,27 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 		nodes[i].config = json_object_get(data, "config");
 		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
 			nodes[i].port_target[k] = -1;
+		nodes[i].invalid_target = -1;
 		if (nodes[i].id == NULL || nodes[i].type == NULL) {
 			snprintf(errbuf, errbuf_len, "node %zu is missing \"id\" or \"type\"", i);
+			return false;
+		}
+
+		/* "on_invalid": "drop" (default) | "pass" - what happens to a
+		 * record THIS node flags invalid when it has no dedicated
+		 * "invalid_target" edge (see the edge-parsing loop below) - see
+		 * pipeline.h's struct pipeline_stage_instance comment. "drop"
+		 * matches every stage's pre-version-5 behavior exactly, so an
+		 * existing graph that never mentions this needs zero edits. */
+		const char *on_invalid = json_as_string(json_object_get(data, "on_invalid"), "drop");
+		if (strcmp(on_invalid, "drop") == 0) {
+			nodes[i].pass_invalid = false;
+		} else if (strcmp(on_invalid, "pass") == 0) {
+			nodes[i].pass_invalid = true;
+		} else {
+			snprintf(errbuf, errbuf_len,
+				 "node '%s': invalid \"on_invalid\" value '%s' - must be \"drop\" or \"pass\"",
+				 nodes[i].id, on_invalid);
 			return false;
 		}
 	}
@@ -158,6 +188,33 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 			snprintf(errbuf, errbuf_len, "edge %zu references an unknown node id", e);
 			return false;
 		}
+		/* "invalid_target": true marks this edge as the SOURCE node's
+		 * dedicated path for a record it flags invalid - a completely
+		 * separate routing table from source_port/port_target[] below
+		 * (see pipeline.h's struct pipeline_stage_instance comment).
+		 * Mutually exclusive with source_port on the same edge - a
+		 * record taking this path never consults out_port at all, so
+		 * a source_port alongside it could never mean what it looks
+		 * like it means. */
+		bool is_invalid_edge = json_as_bool(json_object_get(edge, "invalid_target"), false);
+		if (is_invalid_edge) {
+			if (json_object_get(edge, "source_port") != NULL) {
+				snprintf(errbuf, errbuf_len,
+					 "edge %zu: \"invalid_target\" and \"source_port\" are mutually "
+					 "exclusive on one edge", e);
+				return false;
+			}
+			if (nodes[src_idx].invalid_target != -1) {
+				snprintf(errbuf, errbuf_len,
+					 "node '%s': already has an invalid-record edge - only one is "
+					 "allowed per node", nodes[src_idx].id);
+				return false;
+			}
+			nodes[src_idx].invalid_target = (int)dst_idx;
+			nodes[dst_idx].in_degree++;
+			continue;
+		}
+
 		/* Optional - omitted (or 0) means "this node's sole/first output
 		 * port," so every existing single-output graph keeps loading
 		 * unchanged with zero edits. */
@@ -274,6 +331,22 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 		chain->stages[idx].port_count = port_count;
 		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
 			chain->stages[idx].children[k] = -1;
+
+		/* Resolved exactly like a normal child below (same
+		 * expected_in propagation, same BFS enqueue) but kept
+		 * entirely separate from port_count/children[] - see
+		 * pipeline.h's struct pipeline_stage_instance comment. A
+		 * node's invalid-record edge carries the same out_type as
+		 * every other edge out of it (the flagged record is still the
+		 * same shape, just judged bad), so the ordinary in_types
+		 * membership check below still applies once this target node
+		 * is dequeued. */
+		chain->stages[idx].invalid_child = n->invalid_target;
+		chain->stages[idx].pass_invalid = n->pass_invalid;
+		if (n->invalid_target != -1) {
+			nodes[n->invalid_target].expected_in = stage->out_type;
+			queue[tail++] = (size_t)n->invalid_target;
+		}
 
 		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++) {
 			bool wired = n->port_target[k] != -1;

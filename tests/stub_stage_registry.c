@@ -34,7 +34,7 @@ multi_out_stub_process(void *state, const struct stage_record *in, struct stage_
 	(void)state;
 	memcpy(out->data, in->data, in->len);
 	out->len = in->len;
-	out->type = PORT_TYPE_VALIDATED;
+	out->type = PORT_TYPE_RAW_RECORD;
 	out->capture_tsc = in->capture_tsc;
 	return (struct stage_result){ .ok = true, .out_port = (in->len > 0 && in->data[0] % 2 == 1) ? 1u : 0u };
 }
@@ -52,7 +52,7 @@ zero_out_ports(void *state)
 	return 0;
 }
 
-/* Test-only leaf stage, in_type = VALIDATED (so it can sit directly
+/* Test-only leaf stage, in_type = RAW_RECORD (so it can sit directly
  * after multi_out_stub above without needing a full
  * extract->convert->forward_udp tail on each branch) - keeps
  * test_graph_config.c's branching-graph tests small and focused on the
@@ -73,22 +73,22 @@ static const struct stage g_registry[] = {
 	{
 		.name = "validate",
 		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
-		.out_type = PORT_TYPE_VALIDATED,
+		.out_type = PORT_TYPE_RAW_RECORD,
 		.init = validate_stage_init,
 		.process = validate_stage_process,
 		.teardown = validate_stage_teardown,
 	},
 	{
 		.name = "extract",
-		.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
-		.out_type = PORT_TYPE_EXTRACTED,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
+		.out_type = PORT_TYPE_RAW_RECORD,
 		.init = extract_stage_init,
 		.process = extract_stage_process,
 		.teardown = extract_stage_teardown,
 	},
 	{
 		.name = "convert",
-		.in_types = PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 		.out_type = PORT_TYPE_ENGINEERING,
 		.init = convert_stage_init,
 		.process = convert_stage_process,
@@ -96,8 +96,7 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "forward_udp",
-		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED) |
-			    PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 		.out_type = PORT_TYPE_WIRE_FRAME,
 		.init = forward_udp_stage_init,
 		.out_port_count = zero_out_ports,
@@ -106,8 +105,7 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "dump_binary",
-		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED) |
-			    PORT_TYPE_BIT(PORT_TYPE_EXTRACTED) | PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME),
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME),
 		.out_type = PORT_TYPE_RAW_RECORD,
 		.init = dump_binary_stage_init,
 		.out_port_count = zero_out_ports,
@@ -126,7 +124,7 @@ static const struct stage g_registry[] = {
 	{
 		.name = "multi_out_stub",
 		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
-		.out_type = PORT_TYPE_VALIDATED,
+		.out_type = PORT_TYPE_RAW_RECORD,
 		.init = validate_stage_init,
 		.out_port_count = multi_out_stub_port_count,
 		.process = multi_out_stub_process,
@@ -134,7 +132,7 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "leaf_stub",
-		.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 		.out_type = PORT_TYPE_WIRE_FRAME,
 		.init = validate_stage_init,
 		.out_port_count = zero_out_ports,
@@ -171,8 +169,6 @@ stage_port_type_name(enum stage_port_type type)
 {
 	switch (type) {
 	case PORT_TYPE_RAW_RECORD:  return "raw_record";
-	case PORT_TYPE_VALIDATED:   return "validated";
-	case PORT_TYPE_EXTRACTED:   return "extracted";
 	case PORT_TYPE_ENGINEERING: return "engineering";
 	case PORT_TYPE_WIRE_FRAME:  return "wire_frame";
 	default:                    return "unknown";

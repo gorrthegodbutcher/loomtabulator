@@ -7,7 +7,7 @@
 #include "forward_udp_stage.h"
 #include "../common.h"
 
-/* raw_record/validated/extracted -> PORT_TYPE_WIRE_FRAME (and, unlike
+/* PORT_TYPE_RAW_RECORD -> PORT_TYPE_WIRE_FRAME (and, unlike
  * every other stage, actually transmits). Ships in->data verbatim as
  * the UDP payload, one packet per record, no batching - a known,
  * deliberate v1 simplification (see the project plan's Phase 2 notes
@@ -108,17 +108,13 @@ struct stage_result
 forward_udp_stage_process(void *state, const struct stage_record *in, struct stage_record *out)
 {
 	struct forward_config *cfg = state;
+	(void)out; /* a leaf - nothing downstream ever reads *out */
 
 	/* Verbatim - in->data is already an opaque byte blob regardless of
 	 * which of raw_record/validated/extracted produced it (see this
 	 * file's own header comment for why PORT_TYPE_ENGINEERING isn't
 	 * accepted here at all), so there's nothing to reinterpret or
 	 * byte-swap, just bytes on the wire exactly as received. */
-	memcpy(out->data, in->data, in->len);
-	out->type = PORT_TYPE_WIRE_FRAME;
-	out->len = in->len;
-	out->capture_tsc = in->capture_tsc;
-
 	ssize_t sent = sendto(cfg->sock_fd, in->data, in->len, 0,
 			       (struct sockaddr *)&cfg->dst_addr, sizeof(cfg->dst_addr));
 	if (sent != (ssize_t)in->len)

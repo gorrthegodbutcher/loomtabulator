@@ -40,6 +40,18 @@ export interface StageNodeData extends Record<string, unknown> {
                           // "no incoming edge yet", so StageNode.tsx
                           // shows a neutral target handle rather than
                           // implying it only accepts one type.
+  onInvalid: "drop" | "pass"; // graph_config.c's per-node "on_invalid"
+                          // (version 5) - what happens to a record this
+                          // node flags via STAGE_RECORD_FLAG_INTEGRITY_
+                          // FAILED when its dedicated INVALID_HANDLE_ID
+                          // edge below isn't wired. "drop" is the
+                          // default and matches every stage's
+                          // pre-version-5 behavior, so a loaded graph
+                          // that never mentions this round-trips as
+                          // "drop" with zero visible change. Toggled via
+                          // App.tsx's right-click context menu; inert
+                          // for the synthetic ring-input node (it never
+                          // flags anything).
 }
 
 export interface GraphMeta {
@@ -53,7 +65,7 @@ interface RawGraphNode {
   id: string;
   type: string;
   position?: { x: number; y: number };
-  data?: { config?: unknown; label?: string };
+  data?: { config?: unknown; label?: string; on_invalid?: string };
 }
 
 interface RawGraphEdge {
@@ -64,6 +76,13 @@ interface RawGraphEdge {
                           // graph_config.h; omitted whenever it's 0 so
                           // every single-output graph round-trips with
                           // zero schema changes visible on disk.
+  invalid_target?: boolean; // version 5 - marks this edge as its source
+                          // node's dedicated invalid-record path instead
+                          // of an ordinary source_port edge - mutually
+                          // exclusive with source_port (see
+                          // graph_config.c). Omitted (not just false)
+                          // when absent, matching source_port's own
+                          // "don't clutter the file" convention.
 }
 
 interface RawGraph {
@@ -92,8 +111,6 @@ export interface FetchedGraph {
  * both index.css themes rather than switching with them. */
 const PORT_TYPE_COLORS: Record<string, string> = {
   raw_record: "#8b5cf6",
-  validated: "#3b82f6",
-  extracted: "#f59e0b",
   engineering: "#ec4899",
   wire_frame: "#06b6d4",
   none: "var(--border)",
@@ -136,6 +153,16 @@ export const STAGE_NODE_STYLE: CSSProperties = {
 export const RING_INPUT_NODE_ID = "__ring_input__";
 const RING_INPUT_EDGE_ID = "__ring_input_edge__";
 
+/* Source handle id for a node's dedicated invalid-record edge (version
+ * 5 - see StageNodeData.onInvalid and graph_config.c's "invalid_target"
+ * edge field). Distinct from every numbered port handle id ("0", "1",
+ * ...) StageNode.tsx's normal source handles use, so it can share the
+ * same Edge.sourceHandle mechanism without colliding - App.tsx's
+ * onConnect() "already wired" check and saveGraph()'s round-trip below
+ * both just compare handle id strings, no special-casing needed for
+ * this one. */
+export const INVALID_HANDLE_ID = "invalid";
+
 export function makeRingInputNode(x: number, y: number): Node<StageNodeData> {
   return {
     id: RING_INPUT_NODE_ID,
@@ -160,6 +187,8 @@ export function makeRingInputNode(x: number, y: number): Node<StageNodeData> {
       outType: "raw_record",
       outPortCount: 1,
       targetConnectedColor: null,
+      onInvalid: "drop", // inert placeholder - this synthetic node never
+                          // flags anything, but StageNodeData requires it
     },
   };
 }
@@ -219,6 +248,7 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
         outType: st?.out_type ?? "unknown",
         outPortCount: portCounts[i],
         targetConnectedColor: null, // filled in by App.tsx's useMemo
+        onInvalid: n.data?.on_invalid === "pass" ? "pass" : "drop",
       },
     };
   });
@@ -227,7 +257,7 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
     id: e.id ?? `e${i}`,
     source: e.source,
     target: e.target,
-    sourceHandle: String(e.source_port ?? 0),
+    sourceHandle: e.invalid_target ? INVALID_HANDLE_ID : String(e.source_port ?? 0),
   }));
 
   /* The chain's actual starting node - the one nothing points at (v1's
@@ -275,9 +305,16 @@ export async function saveGraph(
       id: n.id,
       type: n.data.type,
       position: n.position,
-      data: { config: n.data.config, label: n.data.label },
+      data: {
+        config: n.data.config,
+        label: n.data.label,
+        ...(n.data.onInvalid === "pass" ? { on_invalid: "pass" } : {}),
+      },
     })),
     edges: realEdges.map((e) => {
+      if (e.sourceHandle === INVALID_HANDLE_ID) {
+        return { id: e.id, source: e.source, target: e.target, invalid_target: true };
+      }
       const sourcePort = Number(e.sourceHandle ?? 0);
       return {
         id: e.id,

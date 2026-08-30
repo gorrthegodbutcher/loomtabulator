@@ -26,9 +26,10 @@
 /* Turns an enum stage_port_type value into its bit for struct
  * stage.in_types below - a stage accepting several input types ORs
  * these together (e.g. PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) |
- * PORT_TYPE_BIT(PORT_TYPE_VALIDATED)). The type space is small (5
- * values today) so this comfortably fits one unsigned int; matches
- * this file's own STAGE_RECORD_FLAG_* bit-flag convention. */
+ * PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME), dump_binary's own combination).
+ * The type space is small (3 values today) so this comfortably fits one
+ * unsigned int; matches this file's own STAGE_RECORD_FLAG_* bit-flag
+ * convention. */
 #define PORT_TYPE_BIT(t) (1u << (unsigned)(t))
 
 /* The pipeline processing contract - see the project plan
@@ -63,24 +64,37 @@
  * serialize this same enum's names from plugin_loader.c's
  * dynamically-populated table rather than invent its own type
  * system. */
+/* Version 5 collapsed what used to be four separate "bytes" shapes
+ * (raw_record/validated/extracted) into this one value - see
+ * stage_abi.h's version history for the full reasoning. Whether a given
+ * PORT_TYPE_RAW_RECORD record's header has been checked (validate) or
+ * its payload has been narrowed to a sub-slice (extract, either mode)
+ * is NOT encoded in the type anymore - the type only ever describes
+ * shape ("this is an opaque byte blob"), never trust/quality. That's
+ * struct stage_record.flags's job (STAGE_RECORD_FLAG_INTEGRITY_FAILED
+ * below, and whatever future per-check flags a stage wants to add) -
+ * "has this record passed check X" is an orthogonal, stackable
+ * attribute of the data, not a different kind of data. For the common
+ * case, chain POSITION alone already tells you what's been checked
+ * (nothing reaches convert without having gone through extract, exactly
+ * the same way nothing reaches extract without going through validate -
+ * enforced by in_types membership, not by a dedicated type per stage). */
 enum stage_port_type {
-	PORT_TYPE_RAW_RECORD,   /* struct chrono_record_hdr + payload, exactly
-				  * as read off the input ring - nothing checked
-				  * yet. validate's input type. */
-	PORT_TYPE_VALIDATED,    /* same wire shape as RAW_RECORD, but the
-				  * validate stage has already confirmed magic
-				  * and len are sane - downstream stages can
-				  * assume that without re-checking. */
-	PORT_TYPE_EXTRACTED,    /* a stage-defined fixed-layout value pulled
-				  * out of the payload (see extract_stage.c) -
-				  * opaque bytes outside of that stage's own
-				  * config-declared offset/width. */
+	PORT_TYPE_RAW_RECORD,   /* struct chrono_record_hdr + payload, or any
+				  * stage-narrowed sub-slice of one (see
+				  * extract_stage.c) - an opaque byte blob,
+				  * validated or not, sliced or not. validate's
+				  * input AND output type; extract's input AND
+				  * output type (both modes); forward_udp/
+				  * dump_binary's accepted input. */
 	PORT_TYPE_ENGINEERING,  /* a raw extracted value converted to
 				  * engineering units (see convert_stage.c) -
 				  * a little-endian IEEE 754 double, always,
 				  * regardless of the raw field's original
 				  * width, so every stage downstream of convert
-				  * has one fixed value shape to deal with. */
+				  * has one fixed value shape to deal with. The
+				  * one type that genuinely needs interpretation
+				  * (not just a byte count) to make sense of. */
 	PORT_TYPE_WIRE_FRAME,   /* forward_udp's OUTPUT type - a record that's
 				  * already been built and handed off for
 				  * transmission (or, for dump_binary, already
@@ -99,16 +113,22 @@ enum stage_port_type {
  * simplest to just always carry it rather than have every stage type
  * decide whether it cares. */
 /* First bit of struct stage_record.flags below - a stage sets this on
- * its output record to signal "this payload is a deliberate zero-fill
- * or otherwise known-suspect substitute, not genuine data" (e.g. a
- * checksum-validation stage configured to zero-fill instead of drop on
- * failure) without a downstream stage/consumer needing to inspect
- * payload bytes to notice. Purely opt-in and additive: a stage
- * indifferent to this bit can leave it untouched - see struct stage's
- * own process() comment below for the caller-side zero-init guarantee
- * that makes that safe. One bit for now - grow the bitmask later if a
- * second concrete need (e.g. which specific checksum failed) actually
- * shows up, rather than reserving ranges speculatively. */
+ * its output record to signal "I judged this record bad" (a failed
+ * header check, an out-of-range engineering value, a bad checksum,
+ * etc.) without needing a dedicated port_type of its own - see this
+ * enum's own header comment for why validity is deliberately NOT
+ * encoded as a type. Purely opt-in and additive: a stage indifferent to
+ * this bit can leave it untouched - see struct stage's own process()
+ * comment below for the caller-side zero-init guarantee that makes that
+ * safe. Since version 5, pipeline.c's dispatch loop actively acts on
+ * this bit after every successful process() call - see graph_config.c's
+ * per-node "on_invalid" ("drop"/"pass") and the optional dedicated
+ * invalid-record edge it wires, which together decide what happens to a
+ * flagged record without the stage itself needing to know or care.
+ * validate_stage.c is the first stage to set it. One bit for now - grow
+ * the bitmask later if a second concrete need (e.g. which specific
+ * check failed) actually shows up, rather than reserving ranges
+ * speculatively. */
 #define STAGE_RECORD_FLAG_INTEGRITY_FAILED (1u << 0)
 
 struct stage_record {
@@ -179,9 +199,9 @@ struct stage {
 	 * value, a stage accepting more than one type that need genuinely
 	 * different handling must itself branch on in->type inside
 	 * process() to know which shape it actually received -
-	 * forward_udp_stage.c accepts three types but treats them
-	 * identically (verbatim bytes either way), so it happens not to
-	 * need such a branch; a stage combining shapes that truly differ
+	 * dump_binary_stage.c accepts raw_record and wire_frame but treats
+	 * them identically (verbatim bytes either way), so it happens not
+	 * to need such a branch; a stage combining shapes that truly differ
 	 * would. */
 	unsigned in_types;
 	enum stage_port_type out_type;

@@ -50,9 +50,38 @@ pipeline_run(const struct pipeline_chain *chain, struct pipeline_worker *worker,
 			return false;
 		}
 
-		/* Leaf - graph_config.c already proved out_type ==
-		 * PORT_TYPE_WIRE_FRAME for every node with port_count == 0,
-		 * so reaching one here means the record was fully processed. */
+		/* A flagged record never consults out_port at all - this
+		 * check runs at every node, leaf or not, BEFORE the leaf
+		 * check below, so a leaf can still redirect its own flagged
+		 * records to a different final sink via invalid_child. See
+		 * pipeline.h's struct pipeline_stage_instance comment for the
+		 * full "why" - this is what lets ANY stage (built-in or
+		 * third-party) get flagged-record routing for free just by
+		 * setting STAGE_RECORD_FLAG_INTEGRITY_FAILED, with zero
+		 * awareness of ports/edges on the stage's own part. */
+		if (next.flags & STAGE_RECORD_FLAG_INTEGRITY_FAILED) {
+			if (inst->invalid_child != -1) {
+				idx = (size_t)inst->invalid_child;
+				cur = next;
+				depth++;
+				continue;
+			}
+			if (!inst->pass_invalid) {
+				atomic_fetch_add_explicit(&counters->records_dropped, 1, memory_order_relaxed);
+				fprintf(stderr,
+					"loomtabulator: dropped at stage '%s': flagged invalid "
+					"(STAGE_RECORD_FLAG_INTEGRITY_FAILED), no on_invalid route "
+					"configured\n",
+					inst->stage->name);
+				return false;
+			}
+			/* pass_invalid: fall through to normal out_port routing
+			 * below, carrying the flag along unchanged. */
+		}
+
+		/* Leaf - out_type is unused/unconstrained for one (see
+		 * stage.h's out_port_count comment) - reaching one here means
+		 * the record was fully processed. */
 		if (inst->port_count == 0)
 			break;
 

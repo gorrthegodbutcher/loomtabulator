@@ -132,8 +132,8 @@ router_teardown(void *state)
  * type this stage actually sits between in your own graph. */
 static const struct stage g_stage = {
 	.name = "example_router",
-	.in_types = PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
-	.out_type = PORT_TYPE_EXTRACTED,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
+	.out_type = PORT_TYPE_RAW_RECORD,
 	.init = router_init,
 	.out_port_count = router_out_port_count,
 	.process = router_process,

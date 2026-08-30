@@ -53,12 +53,12 @@ example_teardown(void *state)
 
 /* A passthrough stage doesn't transform the record's meaning, so its
  * declared in_type/out_type match - pick whichever port type this
- * stage actually sits between in your own graph; PORT_TYPE_EXTRACTED
+ * stage actually sits between in your own graph; PORT_TYPE_RAW_RECORD
  * is just this example's arbitrary choice. */
 static const struct stage g_stage = {
 	.name = "example",
-	.in_types = PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
-	.out_type = PORT_TYPE_EXTRACTED,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
+	.out_type = PORT_TYPE_RAW_RECORD,
 	.init = example_init,
 	.process = example_process,
 	.teardown = example_teardown,

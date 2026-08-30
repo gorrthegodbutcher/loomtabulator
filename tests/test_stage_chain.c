@@ -54,7 +54,7 @@ router_process(void *state, const struct stage_record *in, struct stage_record *
 	(void)state;
 	memcpy(out->data, in->data, in->len);
 	out->len = in->len;
-	out->type = PORT_TYPE_VALIDATED;
+	out->type = PORT_TYPE_RAW_RECORD;
 	out->capture_tsc = in->capture_tsc;
 	return (struct stage_result){ .ok = true, .out_port = in->data[0] % 2 };
 }
@@ -69,7 +69,7 @@ router_port_count(void *state)
 static const struct stage router_stage = {
 	.name = "test_router",
 	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
-	.out_type = PORT_TYPE_VALIDATED,
+	.out_type = PORT_TYPE_RAW_RECORD,
 	.out_port_count = router_port_count,
 	.process = router_process,
 };
@@ -95,7 +95,7 @@ leaf_port_count(void *state)
 
 static const struct stage leaf_stage = {
 	.name = "test_leaf",
-	.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 	.out_type = PORT_TYPE_WIRE_FRAME,
 	.out_port_count = leaf_port_count,
 	.process = leaf_process,
@@ -110,22 +110,33 @@ run_routing_test(void)
 	chain.root_idx = 0;
 	chain.stage_count = 3;
 
+	/* invalid_child explicitly set to -1 on every stage below, same
+	 * "-1 means no edge here" convention children[] already uses -
+	 * struct pipeline_chain's {0} zero-init above would otherwise leave
+	 * it at 0, a REAL (if unused by this test - router_process()/
+	 * leaf_process() never set STAGE_RECORD_FLAG_INTEGRITY_FAILED)
+	 * index rather than "none". graph_config.c always sets this
+	 * explicitly too (see its own code) - this hand-built chain just
+	 * has to do it by hand. */
 	chain.stages[0].stage = &router_stage;
 	chain.stages[0].port_count = 2;
 	chain.stages[0].children[0] = 1;
 	chain.stages[0].children[1] = 2;
+	chain.stages[0].invalid_child = -1;
 	for (unsigned k = 2; k < STAGE_MAX_OUT_PORTS; k++)
 		chain.stages[0].children[k] = -1;
 
 	chain.stages[1].stage = &leaf_stage;
 	chain.stages[1].state = &leaf0_hit;
 	chain.stages[1].port_count = 0;
+	chain.stages[1].invalid_child = -1;
 	for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
 		chain.stages[1].children[k] = -1;
 
 	chain.stages[2].stage = &leaf_stage;
 	chain.stages[2].state = &leaf1_hit;
 	chain.stages[2].port_count = 0;
+	chain.stages[2].invalid_child = -1;
 	for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
 		chain.stages[2].children[k] = -1;
 
@@ -145,6 +156,158 @@ run_routing_test(void)
 	assert(leaf1_hit && !leaf0_hit);
 	assert(atomic_load(&counters.records_forwarded) == 2);
 	printf("PASS: pipeline_run() routes an odd-first-byte record to port 1's child, not port 0's\n");
+}
+
+/* --- Version 5's engine-level invalid-record routing
+ * (pipeline_stage_instance.invalid_child/pass_invalid - see pipeline.h)
+ * exercised directly against real pipeline_run() calls, not just
+ * graph_config.c's wiring resolution (test_graph_config.c covers that
+ * side). flaggy_stage flags a record iff its first payload byte is odd
+ * - a real, deterministic judgment, same spirit as router_process()
+ * above. */
+
+static struct stage_result
+flaggy_process(void *state, const struct stage_record *in, struct stage_record *out)
+{
+	(void)state;
+	memcpy(out->data, in->data, in->len);
+	out->len = in->len;
+	out->type = PORT_TYPE_RAW_RECORD;
+	out->capture_tsc = in->capture_tsc;
+	if (in->len > 0 && (in->data[0] % 2) == 1)
+		out->flags |= STAGE_RECORD_FLAG_INTEGRITY_FAILED;
+	return (struct stage_result){ .ok = true, .out_port = 0 };
+}
+
+static unsigned
+flaggy_port_count(void *state)
+{
+	(void)state;
+	return 1;
+}
+
+static const struct stage flaggy_stage = {
+	.name = "test_flaggy",
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
+	.out_type = PORT_TYPE_RAW_RECORD,
+	.out_port_count = flaggy_port_count,
+	.process = flaggy_process,
+};
+
+static void
+run_invalid_routing_test(void)
+{
+	/* Case 1: invalid_child wired - a flagged record routes there
+	 * instead of the normal out_port; an unflagged one still takes the
+	 * normal path. */
+	{
+		bool normal_hit = false, invalid_hit = false;
+		struct pipeline_chain chain = {0};
+		chain.root_idx = 0;
+		chain.stage_count = 3;
+
+		chain.stages[0].stage = &flaggy_stage;
+		chain.stages[0].port_count = 1;
+		chain.stages[0].children[0] = 1;
+		chain.stages[0].invalid_child = 2;
+		for (unsigned k = 1; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[0].children[k] = -1;
+
+		chain.stages[1].stage = &leaf_stage;
+		chain.stages[1].state = &normal_hit;
+		chain.stages[1].invalid_child = -1;
+		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[1].children[k] = -1;
+
+		chain.stages[2].stage = &leaf_stage;
+		chain.stages[2].state = &invalid_hit;
+		chain.stages[2].invalid_child = -1;
+		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[2].children[k] = -1;
+
+		struct pipeline_worker worker;
+		struct pipeline_counters counters;
+		pipeline_counters_init(&counters);
+
+		uint8_t odd_payload[1] = { 0x01 };
+		assert(pipeline_run(&chain, &worker, &counters, odd_payload, sizeof(odd_payload), 0));
+		assert(invalid_hit && !normal_hit);
+		assert(atomic_load(&counters.records_forwarded) == 1);
+		printf("PASS: a flagged record with invalid_child wired routes there, not the normal out_port\n");
+
+		normal_hit = invalid_hit = false;
+		uint8_t even_payload[1] = { 0x02 };
+		assert(pipeline_run(&chain, &worker, &counters, even_payload, sizeof(even_payload), 0));
+		assert(normal_hit && !invalid_hit);
+		printf("PASS: an unflagged record still routes to the normal out_port\n");
+	}
+
+	/* Case 2: no invalid_child, pass_invalid=false (the default) - a
+	 * flagged record is dropped, counted the same as an ok=false
+	 * result. */
+	{
+		bool leaf_hit = false;
+		struct pipeline_chain chain = {0};
+		chain.root_idx = 0;
+		chain.stage_count = 2;
+
+		chain.stages[0].stage = &flaggy_stage;
+		chain.stages[0].port_count = 1;
+		chain.stages[0].children[0] = 1;
+		chain.stages[0].invalid_child = -1;
+		chain.stages[0].pass_invalid = false;
+		for (unsigned k = 1; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[0].children[k] = -1;
+
+		chain.stages[1].stage = &leaf_stage;
+		chain.stages[1].state = &leaf_hit;
+		chain.stages[1].invalid_child = -1;
+		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[1].children[k] = -1;
+
+		struct pipeline_worker worker;
+		struct pipeline_counters counters;
+		pipeline_counters_init(&counters);
+
+		uint8_t odd_payload[1] = { 0x01 };
+		assert(!pipeline_run(&chain, &worker, &counters, odd_payload, sizeof(odd_payload), 0));
+		assert(!leaf_hit);
+		assert(atomic_load(&counters.records_dropped) == 1);
+		printf("PASS: a flagged record with no invalid_child and pass_invalid=false is dropped\n");
+	}
+
+	/* Case 3: no invalid_child, pass_invalid=true - a flagged record
+	 * still continues down the normal out_port. */
+	{
+		bool leaf_hit = false;
+		struct pipeline_chain chain = {0};
+		chain.root_idx = 0;
+		chain.stage_count = 2;
+
+		chain.stages[0].stage = &flaggy_stage;
+		chain.stages[0].port_count = 1;
+		chain.stages[0].children[0] = 1;
+		chain.stages[0].invalid_child = -1;
+		chain.stages[0].pass_invalid = true;
+		for (unsigned k = 1; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[0].children[k] = -1;
+
+		chain.stages[1].stage = &leaf_stage;
+		chain.stages[1].state = &leaf_hit;
+		chain.stages[1].invalid_child = -1;
+		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
+			chain.stages[1].children[k] = -1;
+
+		struct pipeline_worker worker;
+		struct pipeline_counters counters;
+		pipeline_counters_init(&counters);
+
+		uint8_t odd_payload[1] = { 0x01 };
+		assert(pipeline_run(&chain, &worker, &counters, odd_payload, sizeof(odd_payload), 0));
+		assert(leaf_hit);
+		assert(atomic_load(&counters.records_forwarded) == 1);
+		printf("PASS: a flagged record with pass_invalid=true still continues down the normal out_port\n");
+	}
 }
 
 /* dump_binary/dump_text are exercised directly (init/process/teardown,
@@ -252,13 +415,14 @@ main(void)
 	struct stage_record validated = { .data = buf1 };
 	struct stage_result r1 = validate_stage_process(validate_state, &raw, &validated);
 	assert(r1.ok);
-	assert(validated.type == PORT_TYPE_VALIDATED);
+	assert(validated.type == PORT_TYPE_RAW_RECORD);
 	assert(validated.capture_tsc == 123456789);
+	assert(!(validated.flags & STAGE_RECORD_FLAG_INTEGRITY_FAILED)); /* good magic - not flagged */
 
 	struct stage_record extracted = { .data = buf2 };
 	struct stage_result r2 = extract_stage_process(extract_state, &validated, &extracted);
 	assert(r2.ok);
-	assert(extracted.type == PORT_TYPE_EXTRACTED);
+	assert(extracted.type == PORT_TYPE_RAW_RECORD);
 	assert(extracted.len == 8);
 
 	struct stage_record engineering = { .data = buf3 };
@@ -270,13 +434,20 @@ main(void)
 	assert(value > 0.0419 && value < 0.0421); /* 42 * 0.001 */
 	printf("PASS: validate -> extract -> convert chain (42 raw -> %.4f engineering)\n", value);
 
-	/* validate rejects bad magic */
+	/* validate flags (doesn't hard-drop) a bad magic - the record's
+	 * shape is still trustworthy, so it's a content judgment, not a
+	 * structural failure; see validate_stage.c's own comment. What
+	 * actually happens to a flagged record is pipeline.c's/
+	 * graph_config.c's call, not this stage's - see stage.h's flag
+	 * comment. */
 	uint8_t bad_magic[64];
 	build_record(bad_magic, 0xdeadbeef, 42, 16);
 	struct stage_record raw2 = { .data = bad_magic, .len = sizeof(struct chrono_record_hdr) + 16 };
 	struct stage_record out2 = { .data = buf1 };
-	assert(!validate_stage_process(validate_state, &raw2, &out2).ok);
-	printf("PASS: validate rejects bad magic\n");
+	struct stage_result r_bad_magic = validate_stage_process(validate_state, &raw2, &out2);
+	assert(r_bad_magic.ok);
+	assert(out2.flags & STAGE_RECORD_FLAG_INTEGRITY_FAILED);
+	printf("PASS: validate flags (not drops) a bad-magic record\n");
 
 	/* validate rejects a record shorter than the header */
 	struct stage_record too_short = { .data = record, .len = 4 };
@@ -323,6 +494,7 @@ main(void)
 	convert_stage_teardown(convert2_state);
 
 	run_routing_test();
+	run_invalid_routing_test();
 	run_dump_stage_tests();
 
 	printf("\nALL TESTS PASSED\n");

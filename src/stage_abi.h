@@ -70,10 +70,10 @@
  * flat chain, and pipeline.c walks it by reading struct
  * stage_result.out_port at each step (see stage.h and pipeline.h).
  *
- * Version 4 (current): replaced struct stage.in_type (a single enum
+ * Version 4: replaced struct stage.in_type (a single enum
  * stage_port_type) with struct stage.in_types, a PORT_TYPE_BIT(...)
  * bitmask - a stage can now legitimately accept more than one input
- * type (e.g. forward_udp accepts raw_record/validated/extracted alike,
+ * type (e.g. forward_udp accepted raw_record/validated/extracted alike,
  * since a UDP payload is just bytes regardless of which of those three
  * produced it). graph_config.c's edge check became a membership test
  * instead of an equality test. Also dropped the requirement that a
@@ -81,8 +81,37 @@
  * rule was only ever a stand-in for "ends in forward_udp," which
  * stopped being the only kind of terminal sink once dump_binary/
  * dump_text (both leaves, neither producing a wire frame) were added;
- * a leaf's out_type is unused and unconstrained now. */
-#define STAGE_ABI_VERSION 4u
+ * a leaf's out_type is unused and unconstrained now.
+ *
+ * Version 5 (current): enum stage_port_type shrank from 5 values to 3 -
+ * PORT_TYPE_VALIDATED and PORT_TYPE_EXTRACTED are gone. Both only ever
+ * described the SAME wire shape as PORT_TYPE_RAW_RECORD (an opaque byte
+ * blob), differing only in "has this been checked" or "has this been
+ * narrowed to a sub-slice" - neither is a real shape difference, and
+ * extract's own byte-slice mode (added just before this version) proved
+ * the model actively harmful: it made PORT_TYPE_EXTRACTED describe two
+ * incompatible things (a canonical 8-byte value, or an arbitrary-width
+ * slice) depending on config, defeating the entire point of a small,
+ * checkable type set. Every stage's in_types/out_type that referenced
+ * either removed value now uses PORT_TYPE_RAW_RECORD instead - validate
+ * and extract (both modes) are now simple PORT_TYPE_RAW_RECORD ->
+ * PORT_TYPE_RAW_RECORD stages, and convert/forward_udp/dump_binary's
+ * in_types collapse accordingly (see each stage's own plugin shim).
+ * "Has this record passed a check" moved to the ALREADY-existing
+ * struct stage_record.flags (STAGE_RECORD_FLAG_INTEGRITY_FAILED, see
+ * stage.h) instead - an attribute of the data, not a type of the data,
+ * and one that stacks (a future range-check stage can flag independent
+ * of whatever validate already flagged). pipeline.c's dispatch loop
+ * gained real behavior keyed on that flag - see graph_config.c's new
+ * per-node "on_invalid" ("drop"/"pass") and optional dedicated
+ * invalid-record edge - so ANY stage, built-in or third-party, gets
+ * flagged-record routing for free just by setting the bit, without
+ * declaring extra output ports or writing any routing logic itself.
+ * This is an engine-internal addition (struct pipeline_stage_instance,
+ * pipeline.h) - it does NOT touch struct stage/stage_record/
+ * stage_result's layout, so it isn't independently why this is a new
+ * ABI version; the enum shrink is. */
+#define STAGE_ABI_VERSION 5u
 
 #define STAGE_ABI_VERSION_SYMBOL "loom_stage_abi_version"
 #define STAGE_ABI_ENTRY_SYMBOL   "loom_stage_entry"

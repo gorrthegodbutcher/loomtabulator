@@ -92,20 +92,23 @@ stage_port_type` value - a stage can accept more than one input type.
 Build it from `PORT_TYPE_BIT(...)`:
 
 ```c
-.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
+.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME),
 ```
 
-Most stages still only need one bit. Accept more than one when your
-`process()` genuinely treats them the same way - the built-in
-`forward_udp` is the model case: it accepts `raw_record`, `validated`,
-and `extracted` alike, because all three are opaque byte blobs it
-ships onto the wire verbatim, with nothing to reinterpret. It
-deliberately does *not* accept `engineering` - a double is a specific
-host-order numeric value, not an opaque blob, so sending its raw bytes
-without an explicit encoding step would be an unstated, architecture-
-specific format no receiver could safely assume. If your stage accepts
-several types that need genuinely different handling, check `in->type`
-inside `process()` to know which one you actually got.
+Most stages still only need one bit. `enum stage_port_type` only has
+three values (`raw_record`, `engineering`, `wire_frame` - see
+`stage.h`'s own comment for why `validated`/`extracted` were removed:
+"has this been checked" and "has this been narrowed to a slice" are
+`struct stage_record.flags` attributes now, not separate types), so
+multi-bit `in_types` mostly matters for a stage like the built-in
+`dump_binary` - the model case: it accepts `raw_record` and
+`wire_frame` alike, because both are opaque byte blobs it writes
+verbatim, with nothing to reinterpret. Nothing accepts `engineering` by
+mistake this way - a double is a specific host-order numeric value, not
+an opaque blob, so treating its raw bytes as one would be silently
+wrong. If your stage accepts several types that need genuinely
+different handling, check `in->type` inside `process()` to know which
+one you actually got.
 
 `graph_config.c` rejects wiring an edge whose upstream `out_type` isn't
 one of your declared `in_types`, with an error naming what it actually
@@ -161,14 +164,27 @@ worked graph using this).
 `STAGE_RECORD_FLAG_INTEGRITY_FAILED`. It's entirely opt-in - a stage
 that never touches `out->flags` behaves exactly as before, since (per
 "process" above) `out` arrives zero-initialized and a stage that
-doesn't set the bit simply leaves it at that default. Set this bit on your
-output record when you're deliberately passing through a known-suspect
-payload instead of dropping it outright (for example, a checksum
-validation failure where you'd rather your caller receive a
-recognizably-invalid record than lose it and shift a downstream
-consumer's sample alignment). A downstream stage that wants to honor
-this just checks `in->flags & STAGE_RECORD_FLAG_INTEGRITY_FAILED` -
-nothing else in loomtabulator inspects or acts on this bit today.
+doesn't set the bit simply leaves it at that default. Set this bit on
+your output record when you judge it bad (a failed checksum, an
+out-of-range engineering value, whatever your stage checks) instead of
+returning `{.ok = false}` outright - `ok = false` unconditionally drops
+a record with no way to route it anywhere, so use the flag instead of a
+hard drop whenever the record is still structurally usable and a graph
+author might want to *do* something with the bad ones (capture them for
+diagnostics, count them, whatever) rather than just lose them silently.
+
+Since `STAGE_ABI_VERSION` 5, loomtabulator's own pipeline engine acts on
+this bit automatically, for any stage that sets it - built-in or
+third-party, no extra code on your part: the graph (not your stage)
+decides whether a flagged record is dropped anyway (the default), still
+passed on down its normal edge unchanged, or routed to a completely
+separate downstream chain via a dedicated edge, configured per node in
+the graph JSON (`"on_invalid": "drop"|"pass"` and an edge's
+`"invalid_target": true` - see the main repo's `graph_config.h` for the
+full schema). Your `process()` never declares extra output ports or
+writes any routing logic for this - set the bit, and the graph handles
+the rest. `in->type` is completely unaffected either way: a flagged
+record is still the exact same `out_type` shape, just judged bad.
 
 ## Build rules
 

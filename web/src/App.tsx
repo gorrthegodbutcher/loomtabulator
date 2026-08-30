@@ -75,6 +75,18 @@ function App() {
         graphMeta.current = graph.meta;
         setNodes(graph.nodes);
         setEdges(graph.edges);
+        // A loaded graph can already contain "new-N" ids from an
+        // earlier UI session (nextNewNodeId is module-level state, reset
+        // to 1 on every fresh page load) - without this, the next
+        // addStageNode() call reissues an id already in the graph, and
+        // since React Flow indexes nodes by id, the freshly added node
+        // silently replaces the existing one at that id instead of
+        // appending a new one.
+        const maxLoadedNewId = graph.nodes.reduce((max, n) => {
+          const m = /^new-(\d+)$/.exec(n.id);
+          return m ? Math.max(max, Number(m[1])) : max;
+        }, 0);
+        nextNewNodeId = Math.max(nextNewNodeId, maxLoadedNewId + 1);
       })
       .catch((err) => setLoadError(String(err)));
   }, []);
@@ -127,6 +139,7 @@ function App() {
           outType: stage.out_type,
           outPortCount,
           targetConnectedColor: null, // filled in by the useMemo below
+          onInvalid: "drop", // default - see StageNodeData's own comment
         },
       },
     ]);
@@ -165,6 +178,22 @@ function App() {
     }
     setContextMenu(null);
   }, [nodes]);
+
+  // Toggles a node's on_invalid between "drop" (default) and "pass" -
+  // the two choices that don't require wiring anything extra (the third,
+  // routing a flagged record to a dedicated next stage, is just drawing
+  // an edge from the node's red "invalid" handle - see StageNode.tsx).
+  // Persists through Save the same way label/position already do.
+  const handleToggleOnInvalid = useCallback((nodeId: string) => {
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === nodeId
+          ? { ...n, data: { ...n.data, onInvalid: n.data.onInvalid === "pass" ? "drop" : "pass" } }
+          : n,
+      ),
+    );
+    setContextMenu(null);
+  }, []);
 
   const handleDelete = useCallback((nodeId: string) => {
     setNodes((nds) => nds.filter((n) => n.id !== nodeId));
@@ -371,6 +400,14 @@ function App() {
               onClick={() => handleOpenConfigure(contextMenu.nodeId)}
             >
               Configure
+            </button>
+            <button
+              className="context-menu-item"
+              disabled={contextMenuNode?.id === RING_INPUT_NODE_ID}
+              title="Cycles between drop (default) and pass - wire the node's red handle instead to route flagged records to a dedicated next stage"
+              onClick={() => handleToggleOnInvalid(contextMenu.nodeId)}
+            >
+              On invalid: {contextMenuNode?.data.onInvalid ?? "drop"}
             </button>
             <button
               className="context-menu-item danger"

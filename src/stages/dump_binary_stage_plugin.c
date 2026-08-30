@@ -16,8 +16,7 @@ dump_binary_out_port_count(void *state)
 
 static const struct stage g_stage = {
 	.name = "dump_binary",
-	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED) |
-		    PORT_TYPE_BIT(PORT_TYPE_EXTRACTED) | PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME),
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME),
 	.out_type = PORT_TYPE_RAW_RECORD, /* unused for a leaf - see stage.h's
 					      out_port_count comment */
 	.init = dump_binary_stage_init,
