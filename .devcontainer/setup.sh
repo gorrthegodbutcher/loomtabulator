@@ -18,6 +18,22 @@ ninja -C /workspace/dpdk_build
 ninja -C /workspace/dpdk_build install
 ldconfig
 
+echo "==> Building SPDK against it..."
+cd /workspace/spdk
+[ -f mk/config.mk ] || ./configure --prefix=/workspace/spdk_package --disable-tests \
+	--disable-unit-tests --with-dpdk=/usr/local
+make -j"$(nproc)"
+make install
+
+echo "==> Deduplicating DPDK shared libraries SPDK's install copied..."
+cd /workspace/spdk_package/lib
+for f in librte_*.so.*; do
+	[ -L "$f" ] && continue
+	target="/usr/local/lib/x86_64-linux-gnu/$f"
+	[ -f "$target" ] && ln -sf "$target" "$f"
+done
+ldconfig
+
 echo "==> Building loomtabulator..."
 cd "$WORKSPACE_DIR/src"
 bear -- make
