@@ -4,12 +4,25 @@
 #include "forward_udp_stage.h"
 #include "../stage_abi.h"
 
+/* forward_udp is a genuine leaf - it transmits and has nothing further
+ * to route to, unlike validate/extract/convert (which rely on
+ * out_port_count's NULL default of "1 port"). Declaring 0 here is what
+ * lets graph_config.c tell "the end of the chain" apart from "a
+ * single-output stage whose one edge just hasn't been wired yet" -
+ * see stage.h's out_port_count comment. */
+static unsigned
+forward_udp_out_port_count(void *state)
+{
+	(void)state;
+	return 0;
+}
+
 static const struct stage g_stage = {
 	.name = "forward_udp",
 	.in_type = PORT_TYPE_ENGINEERING,
 	.out_type = PORT_TYPE_WIRE_FRAME,
-	.max_out_ports = 1,
 	.init = forward_udp_stage_init,
+	.out_port_count = forward_udp_out_port_count,
 	.process = forward_udp_stage_process,
 	.teardown = forward_udp_stage_teardown,
 };

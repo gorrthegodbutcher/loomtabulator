@@ -25,8 +25,10 @@ pipeline_run(const struct pipeline_chain *chain, struct pipeline_worker *worker,
 	};
 	memcpy(worker->scratch[0], raw_data, raw_len);
 
-	for (size_t i = 0; i < chain->stage_count; i++) {
-		const struct pipeline_stage_instance *inst = &chain->stages[i];
+	size_t idx = chain->root_idx;
+	unsigned depth = 0;
+	for (;;) {
+		const struct pipeline_stage_instance *inst = &chain->stages[idx];
 		/* Deliberate, ABI-level guarantee (see stage.h's own comment
 		 * on struct stage.process): every field left off this
 		 * designated initializer - .type/.len/.capture_tsc/.flags -
@@ -37,7 +39,7 @@ pipeline_run(const struct pipeline_chain *chain, struct pipeline_worker *worker,
 		 * the zero-fill (e.g. reusing a stale buffer via memcpy)
 		 * without updating that comment too. */
 		struct stage_record next = {
-			.data = worker->scratch[(i + 1) % 2],
+			.data = worker->scratch[(depth + 1) % 2],
 		};
 
 		struct stage_result res = inst->stage->process(inst->state, &cur, &next);
@@ -47,7 +49,31 @@ pipeline_run(const struct pipeline_chain *chain, struct pipeline_worker *worker,
 				inst->stage->name, res.drop_reason ? res.drop_reason : "(no reason given)");
 			return false;
 		}
+
+		/* Leaf - graph_config.c already proved out_type ==
+		 * PORT_TYPE_WIRE_FRAME for every node with port_count == 0,
+		 * so reaching one here means the record was fully processed. */
+		if (inst->port_count == 0)
+			break;
+
+		if (res.out_port >= inst->port_count) {
+			/* A plugin returning an out_port outside its own
+			 * declared range is a runtime contract violation, not
+			 * an ordinary drop (graph_config.c already guaranteed
+			 * every value in [0, port_count) IS wired) - logged
+			 * distinctly so it reads as a plugin bug, not routing
+			 * policy. */
+			atomic_fetch_add_explicit(&counters->records_dropped, 1, memory_order_relaxed);
+			fprintf(stderr,
+				"loomtabulator: stage '%s' returned out-of-range out_port %u "
+				"(declares %u port(s)) - dropping record\n",
+				inst->stage->name, res.out_port, inst->port_count);
+			return false;
+		}
+
+		idx = (size_t)inst->children[res.out_port];
 		cur = next;
+		depth++;
 	}
 
 	atomic_fetch_add_explicit(&counters->records_forwarded, 1, memory_order_relaxed);

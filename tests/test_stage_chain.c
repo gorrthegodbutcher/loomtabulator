@@ -7,12 +7,16 @@
 #include "../src/stages/validate_stage.h"
 #include "../src/stages/extract_stage.h"
 #include "../src/stages/convert_stage.h"
+#include "../src/pipeline.h"
 
 /* DPDK-free: validate/extract/convert are all deliberately mbuf-free
- * (see stage.h's header comment) - this exercises them chained together
- * exactly as pipeline.c would, without pipeline.c, the ring, or
- * forward_udp (the one stage type that actually needs DPDK) involved at
- * all. Run as a plain host binary, same convention as
+ * (see stage.h's header comment), and pipeline.c's own chain-walking
+ * logic is pure C with no DPDK/ring involvement either (see
+ * pipeline.h) - this file exercises the individual stage functions
+ * chained together by hand, and separately (see run_routing_test())
+ * pipeline_run() itself against a small hand-built tree, without the
+ * ring or forward_udp (the one stage type that actually needs DPDK)
+ * involved at all. Run as a plain host binary, same convention as
  * dpdk-app-example's test_common.c. */
 
 static struct json_value *
@@ -34,6 +38,111 @@ parse_or_die(const char *text)
 		abort();
 	}
 	return v;
+}
+
+/* --- Tiny hand-built router+leaves tree, exercising pipeline.c's
+ * out_port-driven tree walk directly - no JSON, no graph_config.c
+ * involved. Nothing else in this test suite proves pipeline_run()
+ * actually follows stage_result.out_port to the right child rather
+ * than always falling through to some fixed successor. */
+
+static struct stage_result
+router_process(void *state, const struct stage_record *in, struct stage_record *out)
+{
+	(void)state;
+	memcpy(out->data, in->data, in->len);
+	out->len = in->len;
+	out->type = PORT_TYPE_VALIDATED;
+	out->capture_tsc = in->capture_tsc;
+	return (struct stage_result){ .ok = true, .out_port = in->data[0] % 2 };
+}
+
+static unsigned
+router_port_count(void *state)
+{
+	(void)state;
+	return 2;
+}
+
+static const struct stage router_stage = {
+	.name = "test_router",
+	.in_type = PORT_TYPE_RAW_RECORD,
+	.out_type = PORT_TYPE_VALIDATED,
+	.out_port_count = router_port_count,
+	.process = router_process,
+};
+
+static struct stage_result
+leaf_process(void *state, const struct stage_record *in, struct stage_record *out)
+{
+	bool *hit = state;
+	*hit = true;
+	memcpy(out->data, in->data, in->len);
+	out->len = in->len;
+	out->type = PORT_TYPE_WIRE_FRAME;
+	out->capture_tsc = in->capture_tsc;
+	return (struct stage_result){ .ok = true };
+}
+
+static unsigned
+leaf_port_count(void *state)
+{
+	(void)state;
+	return 0;
+}
+
+static const struct stage leaf_stage = {
+	.name = "test_leaf",
+	.in_type = PORT_TYPE_VALIDATED,
+	.out_type = PORT_TYPE_WIRE_FRAME,
+	.out_port_count = leaf_port_count,
+	.process = leaf_process,
+};
+
+static void
+run_routing_test(void)
+{
+	bool leaf0_hit = false, leaf1_hit = false;
+
+	struct pipeline_chain chain = {0};
+	chain.root_idx = 0;
+	chain.stage_count = 3;
+
+	chain.stages[0].stage = &router_stage;
+	chain.stages[0].port_count = 2;
+	chain.stages[0].children[0] = 1;
+	chain.stages[0].children[1] = 2;
+	for (unsigned k = 2; k < STAGE_MAX_OUT_PORTS; k++)
+		chain.stages[0].children[k] = -1;
+
+	chain.stages[1].stage = &leaf_stage;
+	chain.stages[1].state = &leaf0_hit;
+	chain.stages[1].port_count = 0;
+	for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
+		chain.stages[1].children[k] = -1;
+
+	chain.stages[2].stage = &leaf_stage;
+	chain.stages[2].state = &leaf1_hit;
+	chain.stages[2].port_count = 0;
+	for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
+		chain.stages[2].children[k] = -1;
+
+	struct pipeline_worker worker;
+	struct pipeline_counters counters;
+	pipeline_counters_init(&counters);
+
+	uint8_t even_payload[4] = { 0x04, 0, 0, 0 };
+	assert(pipeline_run(&chain, &worker, &counters, even_payload, sizeof(even_payload), 0));
+	assert(leaf0_hit && !leaf1_hit);
+	assert(atomic_load(&counters.records_forwarded) == 1);
+	printf("PASS: pipeline_run() routes an even-first-byte record to port 0's child\n");
+
+	leaf0_hit = false;
+	uint8_t odd_payload[4] = { 0x05, 0, 0, 0 };
+	assert(pipeline_run(&chain, &worker, &counters, odd_payload, sizeof(odd_payload), 0));
+	assert(leaf1_hit && !leaf0_hit);
+	assert(atomic_load(&counters.records_forwarded) == 2);
+	printf("PASS: pipeline_run() routes an odd-first-byte record to port 1's child, not port 0's\n");
 }
 
 static void
@@ -156,6 +265,8 @@ main(void)
 	extract_stage_teardown(extract_oob_state);
 	convert_stage_teardown(convert_state);
 	convert_stage_teardown(convert2_state);
+
+	run_routing_test();
 
 	printf("\nALL TESTS PASSED\n");
 	return 0;

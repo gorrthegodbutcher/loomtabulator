@@ -63,18 +63,24 @@ unbuilt, check that first, and confirm with
 Five tiers (`make test` in `src/`), same convention as
 `dpdk-app-example`'s `tests/test_common.c`:
 - `tests/test_stage_chain.c` - `validate`/`extract`/`convert` are
-  deliberately mbuf-free (see `src/stage.h`'s header comment), so this
-  runs as a plain host binary with zero DPDK involvement.
+  deliberately mbuf-free (see `src/stage.h`'s header comment), and
+  `src/pipeline.c`'s tree-walking execution is pure C too, so this runs
+  as a plain host binary with zero DPDK involvement - including a
+  hand-built multi-port `pipeline_chain` (no JSON, no
+  `graph_config.c`) proving `pipeline_run()` actually follows
+  `stage_result.out_port` to the right child.
 - `tests/test_graph_config.c` - exercises `graph_config_load()`'s
-  schema/chain validation, linked against `tests/stub_stage_registry.c`
-  (a frozen copy of the pre-plugin-conversion static 4-entry table)
-  rather than the real `src/plugin_loader.c` - this tier is about
-  `graph_config_load()`'s chain-building logic against a known-good
-  registry, not the `dlopen()` machinery itself (that's
-  `test_plugin_loader`'s job, below). `forward_udp_stage.c` transmits
-  over a plain kernel UDP socket, not a DPDK-bound NIC (see that file's
-  own header comment), so this entire tier links with zero DPDK
-  involvement - a plain host binary, same as `test_stage_chain`.
+  schema/tree-building validation (including multi-port wiring - see
+  `stage.h`'s `out_port_count`), linked against
+  `tests/stub_stage_registry.c` (a frozen stand-in for
+  `plugin_loader.c`'s dynamically-populated registry, plus a couple of
+  test-only multi-port stage doubles) rather than the real
+  `src/plugin_loader.c` - this tier is about `graph_config_load()`'s
+  own logic against a known-good registry, not the `dlopen()` machinery
+  itself (that's `test_plugin_loader`'s job, below). `forward_udp_stage.c`
+  transmits over a plain kernel UDP socket, not a DPDK-bound NIC (see
+  that file's own header comment), so this entire tier links with zero
+  DPDK involvement - a plain host binary, same as `test_stage_chain`.
 - `tests/test_epoch_barrier.c` - `src/epoch_barrier.c`'s state machine
   is deliberately DPDK-free too (see its own header comment), so this
   runs real pthreads against a fake in-memory FIFO with zero EAL
@@ -147,13 +153,18 @@ directly: `./build/test_epoch_barrier`.
   does no sandboxing or vetting of plugins beyond the ABI-version
   check, an accepted tradeoff given it already runs in a container,
   not something the loader tries to mitigate. `STAGE_ABI_VERSION` is
-  currently `2` (added `struct stage.max_out_ports`,
-  `struct stage_result.out_port`, `struct stage_record.flags` -
-  groundwork requested by `docs/RECOMMENDATIONS.md` for a future
-  multi-output-routing phase; `graph_config.c` rejects any stage
-  declaring `max_out_ports != 1` today, since the pipeline engine only
-  executes single-output chains so far) - see `plugin-sdk/README.md`
-  for what changed and why multi-port stages aren't executable yet.
+  currently `3` - `struct stage.out_port_count(state)` (a dynamic,
+  per-graph-node callback - `NULL` means "always 1 port," the right
+  default for every stage except a genuine leaf) replaced an earlier,
+  short-lived `max_out_ports` static ceiling, and `struct
+  stage_result.out_port`/`struct stage_record.flags` round out the rest
+  - all requested by `docs/RECOMMENDATIONS.md`. Multi-output routing is
+  now fully executable: `graph_config.c` builds a tree (still capped at
+  in-degree ≤ 1 - no merging upstream paths, see its own header
+  comment) instead of a flat chain, and `pipeline.c` walks it by
+  reading `stage_result.out_port` at each step - see
+  `plugin-sdk/README.md`'s "Output ports" section for the plugin-author
+  side of this.
 - **Startup-time validation over hot-path error handling.** A bad graph
   config is a refuse-to-run startup failure (`graph_config_load()`
   returning false with a clear message), never something discovered
@@ -224,20 +235,33 @@ section on faith):
   (`GET /api/graph`, via `web/src/graphApi.ts`), and shows a
   `<ReactFlow>` canvas that can add stage nodes and wire edges,
   enforcing the same `source.out_type == target.in_type` rule
-  `graph_config.c` enforces at load time. Its Save button POSTs the
-  current graph (`POST /api/graph`); the graph JSON schema
-  (`testdata/example_graph.json`, validated by `src/graph_config.c`)
-  echoes React Flow's own `nodes`/`edges` shape on purpose, so this
-  serializes directly - no schema version bump needed for this phase.
-  No per-stage config editor yet - a loaded node's `data.config` is
-  carried through save unedited.
+  `graph_config.c` enforces at load time. Nodes render through a custom
+  `web/src/StageNode.tsx` component (not React Flow's default node
+  type) with one source handle per output port - port count is a
+  per-node-instance, config-dependent property (see
+  `struct stage.out_port_count` below), so `graphApi.ts` calls a
+  dedicated `POST /api/probe-port-count` for each node rather than
+  reading it off `GET /api/stage-types`'s per-type listing. Its Save
+  button POSTs the current graph (`POST /api/graph`); the graph JSON
+  schema (`testdata/example_graph.json` for the linear case,
+  `testdata/example_branching_graph.json` for a real multi-port one,
+  both validated by `src/graph_config.c`) echoes React Flow's own
+  `nodes`/`edges` shape on purpose, so this serializes directly - the
+  one addition, an edge's optional `"source_port"` integer (default
+  `0`), didn't need a schema version bump either, matching this file's
+  standing "schema allows more than the loader currently enforces"
+  convention. No per-stage config editor yet - a loaded node's
+  `data.config` is carried through save unedited.
 - **Backend**: `GET /api/stage-types` (`src/web_status.c`'s
   `handle_stage_types()`) serializes `src/plugin_loader.c`'s
   dynamically-populated table (one entry per successfully-loaded `.so`
   plugin - see "Dynamic plugin loading via `dlopen()`" above) via
   `plugin_loader.c:stage_port_type_name()` - the UI's palette and
-  edge-validation both derive from this table alone, never from a
-  stage's internal behavior. `GET /api/graph`
+  port-type edge-validation derive from this table; port *count*
+  (`POST /api/probe-port-count`, `handle_probe_port_count()`) is
+  separate, since it's an instance property a stage type's listing
+  can't answer - see `src/web_status.h`'s header comment for the full
+  route list. `GET /api/graph`
   serves the raw text of the last graph successfully saved (initially
   the `--graph=PATH` file's own contents at startup) - see
   `struct web_graph_ctx` in `web_status.h`. `POST /api/graph` validates

@@ -22,12 +22,17 @@ import type { StageType } from "./stageTypes";
 // This needs zero backend changes to persist correctly.
 
 export interface StageNodeData extends Record<string, unknown> {
-  label: string;      // what React Flow's default node actually renders -
-                       // without this every node is a blank box (see App.tsx)
-  type: string;      // stage_registry.c name - the JSON schema's node "type"
+  label: string;      // rendered by StageNode.tsx - without this every
+                       // node is a blank box
+  type: string;      // plugin_loader.c's stage name - the JSON schema's node "type"
   config: unknown;    // opaque; round-tripped as-is, not editable yet
   inType: string;
   outType: string;
+  outPortCount: number; // how many source handles StageNode.tsx draws -
+                          // an INSTANCE property (depends on this node's
+                          // own config, see stage.h's out_port_count),
+                          // so it comes from probePortCount() below, not
+                          // from stageTypes.ts's per-type listing.
 }
 
 export interface GraphMeta {
@@ -48,6 +53,10 @@ interface RawGraphEdge {
   id?: string;
   source: string;
   target: string;
+  source_port?: number; // optional, default 0 - see graph_config.c/
+                          // graph_config.h; omitted whenever it's 0 so
+                          // every single-output graph round-trips with
+                          // zero schema changes visible on disk.
 }
 
 interface RawGraph {
@@ -100,6 +109,7 @@ const RING_INPUT_EDGE_ID = "__ring_input_edge__";
 export function makeRingInputNode(x: number, y: number): Node<StageNodeData> {
   return {
     id: RING_INPUT_NODE_ID,
+    type: "stage",
     position: { x, y },
     deletable: false,
     style: {
@@ -118,8 +128,34 @@ export function makeRingInputNode(x: number, y: number): Node<StageNodeData> {
       config: {},
       inType: "none",
       outType: "raw_record",
+      outPortCount: 1,
     },
   };
+}
+
+/* Calls the new POST /api/probe-port-count endpoint (src/web_status.c) -
+ * out_port_count() is a per-INSTANCE, config-dependent property (see
+ * stage.h), not a fixed property of a stage TYPE the way in_type/
+ * out_type are, so this is the only way to know how many handles a
+ * node needs before it's ever wired into a real graph. Builds and
+ * immediately discards a real stage instance server-side; never
+ * touches the actual graph. Falls back to 1 (the overwhelmingly common
+ * case) on any failure - a wrong guess here is only a cosmetic
+ * handle-count issue, since the real graph_config_load() at Save time
+ * remains authoritative either way. */
+export async function probePortCount(type: string, config: unknown): Promise<number> {
+  try {
+    const res = await fetch("/api/probe-port-count", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, config }),
+    });
+    if (!res.ok) return 1;
+    const json: { port_count?: number } = await res.json();
+    return typeof json.port_count === "number" && json.port_count > 0 ? json.port_count : 1;
+  } catch {
+    return 1;
+  }
 }
 
 /* GET /api/graph returns 501 if the binary wasn't wired up with a
@@ -133,10 +169,15 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
   const raw: RawGraph = await res.json();
   const typeByName = new Map(stageTypes.map((t) => [t.name, t]));
 
-  const nodes: Node<StageNodeData>[] = (raw.nodes ?? []).map((n) => {
+  const rawNodes = raw.nodes ?? [];
+  const portCounts = await Promise.all(
+    rawNodes.map((n) => probePortCount(n.type, n.data?.config ?? {})),
+  );
+  const nodes: Node<StageNodeData>[] = rawNodes.map((n, i) => {
     const st = typeByName.get(n.type);
     return {
       id: n.id,
+      type: "stage",
       position: n.position ?? { x: 0, y: 0 },
       style: STAGE_NODE_STYLE,
       data: {
@@ -145,6 +186,7 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
         config: n.data?.config ?? {},
         inType: st?.in_type ?? "unknown",
         outType: st?.out_type ?? "unknown",
+        outPortCount: portCounts[i],
       },
     };
   });
@@ -153,6 +195,7 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
     id: e.id ?? `e${i}`,
     source: e.source,
     target: e.target,
+    sourceHandle: String(e.source_port ?? 0),
   }));
 
   /* The chain's actual starting node - the one nothing points at (v1's
@@ -202,7 +245,15 @@ export async function saveGraph(
       position: n.position,
       data: { config: n.data.config, label: n.data.label },
     })),
-    edges: realEdges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+    edges: realEdges.map((e) => {
+      const sourcePort = Number(e.sourceHandle ?? 0);
+      return {
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        ...(sourcePort !== 0 ? { source_port: sourcePort } : {}),
+      };
+    }),
   };
 
   const res = await fetch("/api/graph", {

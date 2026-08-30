@@ -20,10 +20,17 @@ import {
   fetchGraph,
   saveGraph,
   makeRingInputNode,
+  probePortCount,
   STAGE_NODE_STYLE,
+  RING_INPUT_NODE_ID,
   type StageNodeData,
   type GraphMeta,
 } from "./graphApi";
+import { StageNode } from "./StageNode";
+
+// Defined outside the component - React Flow warns (and pays a
+// re-render cost) if nodeTypes is a fresh object every render.
+const NODE_TYPES = { stage: StageNode };
 
 // New node ids get this prefix so they can never collide with ids
 // loaded from an existing graph (testdata/example_graph.json and
@@ -50,6 +57,10 @@ function App() {
   const graphMeta = useRef<GraphMeta>(DEFAULT_META);
   const [graphApiEnabled, setGraphApiEnabled] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null);
+  const [configEditor, setConfigEditor] = useState<{ nodeId: string; text: string; error: string | null } | null>(
+    null,
+  );
+  const [configNotice, setConfigNotice] = useState<string | null>(null);
 
   useEffect(() => {
     fetchStageTypes()
@@ -84,17 +95,27 @@ function App() {
       if (!source || !target || source.data.outType !== target.data.inType) {
         return; // mirrors graph_config.c's port-type edge validation
       }
+      // mirrors graph_config.c's "output port already has an outgoing
+      // edge" check - immediate feedback only, Save remains the
+      // authoritative check either way, same posture as the port-type
+      // check above.
+      const alreadyWired = edges.some(
+        (e) => e.source === connection.source && e.sourceHandle === connection.sourceHandle,
+      );
+      if (alreadyWired) return;
       setEdges((eds) => addEdge(connection, eds));
     },
-    [nodes],
+    [nodes, edges],
   );
 
-  const addStageNode = useCallback((stage: StageType) => {
+  const addStageNode = useCallback(async (stage: StageType) => {
     const id = `new-${nextNewNodeId++}`;
+    const outPortCount = await probePortCount(stage.name, {});
     setNodes((nds) => [
       ...nds,
       {
         id,
+        type: "stage",
         position: { x: 80 + (nds.length % 5) * 180, y: 80 + Math.floor(nds.length / 5) * 120 },
         style: STAGE_NODE_STYLE,
         data: {
@@ -103,6 +124,7 @@ function App() {
           config: {},
           inType: stage.in_type,
           outType: stage.out_type,
+          outPortCount,
         },
       },
     ]);
@@ -147,6 +169,69 @@ function App() {
     setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
     setContextMenu(null);
   }, []);
+
+  // Configure: edits a node's data.config as raw JSON - there's no
+  // per-stage config schema (a plugin's config shape is opaque to this
+  // UI, see graphApi.ts), so a schema-agnostic text editor is the only
+  // thing that works for every stage type, including one that lets its
+  // OWN config directly set its output port count (e.g. a
+  // "num_channels" field, not just an array length). On save, the node
+  // is re-probed via POST /api/probe-port-count - the same call
+  // addStageNode() already makes - so a config change that alters the
+  // port count immediately redraws the right number of handles. Any
+  // edge whose source_port no longer fits is dropped automatically
+  // (surfaced as a brief notice) rather than left stale on the canvas.
+  const handleOpenConfigure = useCallback(
+    (nodeId: string) => {
+      const node = nodes.find((n) => n.id === nodeId);
+      if (node) {
+        setConfigEditor({ nodeId, text: JSON.stringify(node.data.config ?? {}, null, 2), error: null });
+        setConfigNotice(null);
+      }
+      setContextMenu(null);
+    },
+    [nodes],
+  );
+
+  const handleSaveConfig = useCallback(async () => {
+    if (!configEditor) return;
+
+    let parsedConfig: unknown;
+    try {
+      parsedConfig = JSON.parse(configEditor.text);
+    } catch (err) {
+      setConfigEditor((ce) => (ce ? { ...ce, error: `Invalid JSON: ${String(err)}` } : ce));
+      return;
+    }
+
+    const node = nodes.find((n) => n.id === configEditor.nodeId);
+    if (!node) {
+      setConfigEditor(null);
+      return;
+    }
+
+    const outPortCount = await probePortCount(node.data.type, parsedConfig);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === configEditor.nodeId ? { ...n, data: { ...n.data, config: parsedConfig, outPortCount } } : n,
+      ),
+    );
+
+    const nodeId = configEditor.nodeId;
+    const staleEdgeCount = edges.filter(
+      (e) => e.source === nodeId && Number(e.sourceHandle ?? 0) >= outPortCount,
+    ).length;
+    if (staleEdgeCount > 0) {
+      setEdges((eds) => eds.filter((e) => !(e.source === nodeId && Number(e.sourceHandle ?? 0) >= outPortCount)));
+      setConfigNotice(
+        `${node.data.label}: now has ${outPortCount} output port(s) - removed ${staleEdgeCount} edge(s) that no longer fit.`,
+      );
+    } else {
+      setConfigNotice(null);
+    }
+
+    setConfigEditor(null);
+  }, [configEditor, nodes, edges]);
 
   const contextMenuNode = contextMenu ? nodes.find((n) => n.id === contextMenu.nodeId) : undefined;
 
@@ -200,11 +285,15 @@ function App() {
             {saveStatus.message}
           </p>
         )}
+        {configNotice && (
+          <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>{configNotice}</p>
+        )}
       </aside>
       <main style={{ flex: 1, position: "relative" }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
+          nodeTypes={NODE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -242,12 +331,82 @@ function App() {
               Rename
             </button>
             <button
+              className="context-menu-item"
+              disabled={contextMenuNode?.id === RING_INPUT_NODE_ID}
+              onClick={() => handleOpenConfigure(contextMenu.nodeId)}
+            >
+              Configure
+            </button>
+            <button
               className="context-menu-item danger"
               disabled={contextMenuNode?.deletable === false}
               onClick={() => handleDelete(contextMenu.nodeId)}
             >
               Delete
             </button>
+          </div>
+        </>
+      )}
+
+      {configEditor && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(0, 0, 0, 0.4)" }}
+            onClick={() => setConfigEditor(null)}
+          />
+          <div
+            style={{
+              position: "fixed",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              zIndex: 1000,
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              padding: 16,
+              width: 420,
+              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.3)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="card-title" style={{ marginTop: 0 }}>
+              Configure: {nodes.find((n) => n.id === configEditor.nodeId)?.data.label ?? configEditor.nodeId}
+            </p>
+            <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: -8 }}>
+              Raw JSON - this stage's config shape isn't known to the UI. Saving re-checks how many
+              output ports this stage has and redraws its handles.
+            </p>
+            <textarea
+              value={configEditor.text}
+              onChange={(e) => setConfigEditor((ce) => (ce ? { ...ce, text: e.target.value, error: null } : ce))}
+              rows={12}
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                background: "var(--bg)",
+                color: "var(--text)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: 8,
+                resize: "vertical",
+              }}
+            />
+            {configEditor.error && (
+              <p style={{ fontSize: 11, color: "var(--critical)", fontFamily: "var(--font-mono)" }}>
+                {configEditor.error}
+              </p>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+              <button className="btn" onClick={() => setConfigEditor(null)}>
+                Cancel
+              </button>
+              <button className="btn" onClick={handleSaveConfig}>
+                Save
+              </button>
+            </div>
           </div>
         </>
       )}

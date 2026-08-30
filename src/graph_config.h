@@ -7,10 +7,14 @@
 /* v1's graph JSON schema is documented in full, with a worked example,
  * in the project plan (~/.claude/plans/noble-kindling-lemon.md). Short
  * version: {"nodes":[{"id","type","data":{"config":{...}}}],
- * "edges":[{"source","target"}]}. The schema itself allows branching (so
- * a future Phase 2/3 graph doesn't need a version bump), but v1's loader
- * requires the graph to be a single linear chain and rejects anything
- * else - see graph_config.c's own validation.
+ * "edges":[{"source","target","source_port"}]} - "source_port" is
+ * optional, defaulting to 0, so every single-output graph (the vast
+ * majority) never needs to mention it. The loader builds a tree rooted
+ * at the one node with no incoming edge: fan-out (one node, several
+ * outgoing edges on distinct source_port values) is supported, but
+ * fan-in (a node with more than one incoming edge) is not - see
+ * graph_config.c's own validation, and stage.h's struct
+ * stage.out_port_count comment for the ABI side of this.
  *
  * ring_name/ring_size out is what main.c uses to create (v1) or attach
  * to (Phase 4) the input rte_ring - kept here rather than hardcoded in
@@ -18,8 +22,9 @@
  *
  * Takes a struct pipeline_chain (see pipeline.h) rather than a full
  * struct pipeline as of Phase 2 - this function only ever populates
- * stages[]/stage_count, never per-worker scratch memory or counters, so
- * it stays exactly as single-threaded/startup-only as it was in v1. */
+ * stages[]/stage_count/root_idx, never per-worker scratch memory or
+ * counters, so it stays exactly as single-threaded/startup-only as it
+ * was in v1. */
 
 struct graph_config_result {
 	char ring_name[32];
@@ -27,16 +32,17 @@ struct graph_config_result {
 };
 
 /* Reads path, parses it as JSON, validates it against the schema above
- * (node types exist in stage_registry.c, every edge's port types match,
- * the graph is a single linear chain from a PORT_TYPE_RAW_RECORD-input
- * node to a PORT_TYPE_WIRE_FRAME-output node), and on success calls
- * init() on every stage instance in chain order, populating pl->stages/
- * stage_count. On any failure, writes a human-readable message into
- * errbuf and returns false - this is always a startup-time failure (see
- * stage.h's own header comment on why hot-path code has no comparable
- * runtime error path), never something pipeline_run() itself needs to
- * handle. Any stage state instances already init()'d before a later
- * validation failure are torn down before returning false. */
+ * (node types exist in plugin_loader.c's dynamically-populated
+ * registry, every edge's port types match, the graph is a tree from a
+ * PORT_TYPE_RAW_RECORD-input root to one or more PORT_TYPE_WIRE_FRAME
+ * leaves), and on success calls init()/out_port_count() on every stage
+ * instance, populating pl->stages/stage_count/root_idx. On any failure,
+ * writes a human-readable message into errbuf and returns false - this
+ * is always a startup-time failure (see stage.h's own header comment on
+ * why hot-path code has no comparable runtime error path), never
+ * something pipeline_run() itself needs to handle. Any stage state
+ * instances already init()'d before a later validation failure are
+ * torn down before returning false. */
 bool graph_config_load(const char *path, struct pipeline_chain *chain,
 			struct graph_config_result *out, char *errbuf, size_t errbuf_len);
 

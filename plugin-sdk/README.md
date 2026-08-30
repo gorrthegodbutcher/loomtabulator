@@ -47,8 +47,7 @@ touched from the handle - a mismatch is a clean rejection, not a
 crash. `loom_stage_entry()` returns a pointer to one `static const
 struct stage` describing your stage type: its name (must match a graph
 node's `"type"` field), declared input/output port types (`stage.h`'s
-`enum stage_port_type`), `max_out_ports` (see "Output ports" below),
-and three function pointers:
+`enum stage_port_type`), and four function pointers:
 
 - `init(config)` - called once per graph node using this stage type,
   before any data flows. Receives that node's `data.config` JSON
@@ -56,6 +55,9 @@ and three function pointers:
   no state), or `NULL` to signal a bad config - loomtabulator treats a
   failing `init()` as a startup-time error, never something discovered
   mid-run.
+- `out_port_count(state)` - see "Output ports" below. Optional (`NULL`
+  means "always 1 port") - the overwhelming majority of stages, single-
+  output ones, never need to implement this at all.
 - `process(state, in, out)` - the hot path, called once per record.
   `in->type` is always your declared `in_type`. `*out` is
   zero-initialized before every call - a guarantee loomtabulator's
@@ -81,21 +83,45 @@ collide between them.
 
 ## Output ports
 
-`struct stage.max_out_ports` declares how many output ports your stage
-type has. Every stage in this SDK - and every stage you're likely to
-write - sets `max_out_ports = 1`: `process()` fills exactly one `out`
-record per call, `struct stage_result.out_port` is always `0`, and
-that's the only value loomtabulator's graph loader currently accepts.
+Most stages have exactly one output - `process()` fills one `out`
+record per call, and the graph always knows exactly where that record
+goes next. Leave `out_port_count` as `NULL` (the default every stage in
+this SDK except `example_router_stage.c` uses) and you never need to
+think about this section again.
 
-Declaring `max_out_ports > 1` (and setting `stage_result.out_port` to
-pick which one `out` targets) builds and loads fine - the ABI supports
-it - but **`graph_config.c` currently rejects wiring such a stage into
-a graph at all**, with an error naming "multi-port routing isn't
-executable yet." Routing execution (a stage picking one of several
-downstream destinations per record) is planned but not yet
-implemented in loomtabulator's pipeline engine. If your use case needs
-this, declare `max_out_ports` honestly for forward compatibility, but
-don't expect a graph using it to load successfully yet.
+A stage that needs to route records to different destinations - a demux
+by some field in the payload, for example - implements
+`out_port_count(state)`, returning how many output ports *this graph
+node* has. This is called once per node, right after that node's own
+`init()` succeeds, so the count can depend on that node's own config
+(e.g. how many entries are in a routing table) rather than being a
+fixed constant for the whole plugin type. `process()` then sets
+`struct stage_result.out_port` to pick which port `out` targets for
+that record (`0` if you don't set it, so a single-output stage's
+`process()` needs no changes at all).
+
+Rules `graph_config.c` enforces at graph-load time, all worth knowing
+before you wire a graph:
+
+- Returning a value greater than `STAGE_MAX_OUT_PORTS` (`stage.h`) is a
+  startup error.
+- **Every port in `[0, out_port_count())` must have exactly one
+  outgoing edge.** Declaring 3 ports but wiring only 2 fails to load -
+  this exactness is the whole point of a per-instance count instead of
+  a static ceiling.
+- Returning `0` declares this node a **leaf** - the end of a path
+  through the graph. A leaf must have zero outgoing edges and produce
+  `PORT_TYPE_WIRE_FRAME` (this generalizes the old "the chain's last
+  stage must produce a wire frame" rule to "every leaf must" - see
+  `example_router_stage.c` for a template, and `forward_udp` for the
+  built-in leaf).
+- All of a node's output ports share that instance's single `out_type`
+  - there's no per-port output type.
+
+On the graph side, an edge picks which of its source node's ports it
+comes from via an optional `"source_port"` integer field (default `0`
+- see `testdata/example_branching_graph.json` in the main repo for a
+worked graph using this).
 
 ## Optional: signaling integrity failures
 
@@ -139,9 +165,14 @@ the ABI-version check - that's an accepted tradeoff (loomtabulator
 already runs inside a container), not something this SDK or the loader
 tries to mitigate. Only load plugins you trust.
 
-## Example
+## Examples
 
-See `example_stage.c` in this directory for a minimal worked
-passthrough stage (copies its input record to its output unchanged,
-with one optional `"verbose"` config field). Build it with the command
-at the top of that file.
+- `example_stage.c` - a minimal worked passthrough stage (copies its
+  input record to its output unchanged, with one optional `"verbose"`
+  config field). Single output port, `out_port_count` left `NULL`.
+- `example_router_stage.c` - a minimal worked multi-output router (see
+  "Output ports" above), reading a config-driven `{"byte_value", "port"}`
+  table plus a `"default_port"`. The template to copy and adapt if your
+  stage needs to route records to different destinations.
+
+Build either with the command at the top of its own file.

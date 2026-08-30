@@ -24,12 +24,14 @@ Named in the same spirit as `chrontabulator` - this is its sibling,
 "weaving" processing modules together into a finished, forwarded
 product.
 
-## Scope so far (Phase 1 + 2 done)
+## Scope so far (Phase 1 + 2 done, Phase 3 scaffolded)
 
-CLI + a hand-written JSON graph file only, no web UI yet (Phase 3). A
-pipeline is a strictly linear chain - one path from the input ring to
-one UDP-forwarding stage at the end; branching pipelines are a later
-phase. As of Phase 2, the chain runs across multiple worker lcores
+A pipeline is a tree rooted at the input ring: most nodes have exactly
+one output, but a stage can declare more than one (see "Stage types"
+below and `plugin-sdk/README.md`'s "Output ports") and route each
+record to one of them - `testdata/example_branching_graph.json` is a
+real, loadable example. Every path through the tree still ends in a
+UDP-forwarding stage. As of Phase 2, the chain runs across multiple worker lcores
 (`--workers=N`) pulling competitively off the input ring, with an
 epoch/watermark barrier (`src/epoch_barrier.c`) ensuring all of one
 epoch's records finish before the next epoch's are considered started
@@ -140,11 +142,15 @@ third-party plugin uses - no special-casing between "built-in" and
   client).
 
 New stage types are built entirely outside this repo: implement
-`struct stage`'s init/process/teardown contract, export the two
-`stage_abi.h` functions, and build against `plugin-sdk/` (a small,
-frozen ABI - `stage.h`, `stage_abi.h`, `json.h`/`.c` - with zero DPDK
-dependency; see `plugin-sdk/README.md` for the full build rules and a
-worked example). Drop the resulting `.so` into `--plugins-dir` and
+`struct stage`'s init/process/teardown contract (plus an optional
+`out_port_count(state)` if your stage routes records to more than one
+destination - see `plugin-sdk/README.md`'s "Output ports" and
+`testdata/example_branching_graph.json` for a worked example), export
+the two `stage_abi.h` functions, and build against `plugin-sdk/` (a
+small, frozen ABI - `stage.h`, `stage_abi.h`, `json.h`/`.c` - with zero
+DPDK dependency; see `plugin-sdk/README.md` for the full build rules
+and two worked examples). Drop the resulting `.so` into `--plugins-dir`
+and
 it's picked up on the next startup - no rebuild of loomtabulator
 itself, no source-tree changes. `dlopen()` is a real code-execution
 trust boundary; loomtabulator does no sandboxing or vetting of plugins
@@ -173,13 +179,25 @@ there (it already does UDP dst-port filtering and a clean summary) -
 nothing about `loomtabulator` itself requires that, it's just a more
 capable receiver than `nc` if you want packet-loss/ordering stats.
 
+`testdata/example_branching_graph.json` demonstrates real multi-port
+routing (see "Stage types" above) - it needs
+`plugin-sdk/example_router_stage.c` built and dropped into
+`--plugins-dir` first (it's not one of the four built-ins `make
+plugins` produces). Point two listeners at `127.0.0.1:12345` and
+`:12346`; running it with `--testgen-count=300` sends 298 records to
+the first and 2 (the records whose counter value's low byte is `42`)
+to the second - proof the routing decision, not just the graph
+validation, actually executes.
+
 ## Roadmap
 
-Working now: the stage-chain mechanism, JSON graph loading/validation,
-a synthetic input generator, real UDP forwarding over a plain kernel
-socket (no NIC/DPDK-vdev needed - see "Verifying it end-to-end" above),
-(Phase 2) a multi-core worker pool with epoch/watermark barriers for
-ordering across cores, and (Phase 3, scaffolded) a React Flow web UI -
+Working now: the stage-tree mechanism (including multi-port routing -
+a stage can send different records to different downstream stages, see
+"Stage types" above), JSON graph loading/validation, a synthetic input
+generator, real UDP forwarding over a plain kernel socket (no
+NIC/DPDK-vdev needed - see "Verifying it end-to-end" above), (Phase 2)
+a multi-core worker pool with epoch/watermark barriers for ordering
+across cores, and (Phase 3, scaffolded) a React Flow web UI -
 a real Vite+React+`@xyflow/react` canvas served airgapped as static
 files from `web/dist/`, that loads the current graph
 (`GET /api/graph`), lets you edit it, and saves it back

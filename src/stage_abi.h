@@ -19,8 +19,9 @@
  *   const struct stage *loom_stage_entry(void);
  *       Returns a pointer to a single, static (not stack/heap)
  *       struct stage describing this plugin's one stage type - name,
- *       in_type/out_type, and its init/process/teardown function
- *       pointers (see stage.h). NULL is a valid "reject me" response.
+ *       in_type/out_type, and its init/out_port_count/process/teardown
+ *       function pointers (see stage.h). NULL is a valid "reject me"
+ *       response.
  *
  * These two exports are NOT the whole lifecycle - struct stage's own
  * init(config)/teardown(state) are the real per-instance hooks, called
@@ -49,15 +50,26 @@
  * third-party plugin author needs to follow (no bitfields, no
  * #pragma pack, build for the host's own target triple).
  *
- * Version 2 (current): added struct stage.max_out_ports, struct
- * stage_result.out_port, and struct stage_record.flags (see stage.h)
- * - groundwork for a stage declaring more than one output port and
- * for a stage flagging a record's integrity as suspect, requested by
- * docs/RECOMMENDATIONS.md. max_out_ports > 1 is accepted by this
- * loader but currently REJECTED by graph_config.c at graph-load time
- * - the pipeline engine only executes single-output chains today;
- * multi-port routing execution is a separate, not-yet-built phase. */
-#define STAGE_ABI_VERSION 2u
+ * Version 2: added struct stage.max_out_ports, struct
+ * stage_result.out_port, and struct stage_record.flags (see stage.h) -
+ * groundwork for a stage declaring more than one output port and for a
+ * stage flagging a record's integrity as suspect, requested by
+ * docs/RECOMMENDATIONS.md. max_out_ports > 1 was accepted by the loader
+ * but rejected by graph_config.c at graph-load time - the pipeline
+ * engine only executed single-output chains at that point.
+ *
+ * Version 3 (current): replaced struct stage.max_out_ports (a static
+ * per-plugin-type ceiling) with struct stage.out_port_count(state), a
+ * dynamic per-instance callback - Option 2 from
+ * docs/RECOMMENDATIONS.md's own §3.2, chosen because it lets
+ * graph_config.c validate a node's wiring exactly ("declared 3 ports,
+ * wired 2" is now a startup error, not just "index in range"), at the
+ * cost of needing that node's own init() to run before its edges are
+ * validated - graph_config.c already does that. Multi-port routing is
+ * now fully executable: graph_config.c builds a real tree instead of a
+ * flat chain, and pipeline.c walks it by reading struct
+ * stage_result.out_port at each step (see stage.h and pipeline.h). */
+#define STAGE_ABI_VERSION 3u
 
 #define STAGE_ABI_VERSION_SYMBOL "loom_stage_abi_version"
 #define STAGE_ABI_ENTRY_SYMBOL   "loom_stage_entry"

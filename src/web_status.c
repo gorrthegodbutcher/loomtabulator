@@ -12,6 +12,7 @@
 #include "plugin_loader.h"
 #include "graph_config.h"
 #include "pipeline.h"
+#include "json.h"
 
 #define REQUEST_HEADER_BUF_SIZE 8192
 #define MAX_GRAPH_BODY_BYTES (256 * 1024)
@@ -347,6 +348,79 @@ handle_post_graph(int fd, const char *body, size_t body_len, struct web_graph_ct
 		      "{ \"ok\": true, \"restart_required\": true }\n");
 }
 
+/* POST /api/probe-port-count: the web UI needs to know how many output
+ * ports a node will have, to decide how many handles to draw on it -
+ * but out_port_count() is a per-INSTANCE, config-dependent property
+ * (see stage.h), not a fixed property of a stage TYPE the way
+ * in_type/out_type are, so GET /api/stage-types can't answer this (it
+ * lists types, not instances), and there's still no per-stage config
+ * editor for the client to simulate the answer itself. This builds a
+ * real, throwaway instance - init() + out_port_count() + teardown(),
+ * immediately - exactly the same validate-then-discard shape
+ * handle_post_graph() above already uses, just for one node's
+ * {"type", "config"} instead of a whole graph, and with no temp file
+ * needed (json_parse() works directly on an in-memory buffer; only
+ * graph_config_load() needs a path). Never touches the real graph or
+ * the running pipeline. */
+static void
+handle_probe_port_count(int fd, const char *body, size_t body_len)
+{
+	/* json_parse() mutates its input in place and requires it to
+	 * outlive the returned tree - a private, heap-owned copy, not the
+	 * caller's buffer (which may be the "" literal handle_connection
+	 * passes for a bodyless request). */
+	char *buf = malloc(body_len + 1);
+	if (buf == NULL) {
+		send_response(fd, "500 Internal Server Error", "application/json",
+			      "{ \"error\": \"out of memory\" }\n");
+		return;
+	}
+	memcpy(buf, body, body_len);
+	buf[body_len] = '\0';
+
+	char parse_errbuf[128];
+	struct json_value *root = json_parse(buf, parse_errbuf, sizeof(parse_errbuf));
+	if (root == NULL) {
+		char json[256];
+		size_t off = (size_t)snprintf(json, sizeof(json), "{ \"error\": \"");
+		json_escape_append(json, sizeof(json), &off, parse_errbuf);
+		if (off + 4 < sizeof(json))
+			off += (size_t)snprintf(json + off, sizeof(json) - off, "\" }\n");
+		send_response(fd, "400 Bad Request", "application/json", json);
+		free(buf);
+		return;
+	}
+
+	const char *type = json_as_string(json_object_get(root, "type"), NULL);
+	const struct stage *stage = type != NULL ? stage_registry_find(type) : NULL;
+	if (stage == NULL) {
+		send_response(fd, "400 Bad Request", "application/json",
+			      "{ \"error\": \"unknown stage type\" }\n");
+		json_free(root);
+		free(buf);
+		return;
+	}
+
+	void *state = stage->init(json_object_get(root, "config"));
+	if (state == NULL) {
+		send_response(fd, "400 Bad Request", "application/json",
+			      "{ \"error\": \"failed to initialize this stage - check its config\" }\n");
+		json_free(root);
+		free(buf);
+		return;
+	}
+
+	unsigned port_count = stage->out_port_count != NULL ? stage->out_port_count(state) : 1;
+	if (stage->teardown != NULL)
+		stage->teardown(state);
+	json_free(root);
+	free(buf);
+
+	char json[64];
+	snprintf(json, sizeof(json), "{ \"port_count\": %u }\n", port_count);
+	send_response(fd, "200 OK", "application/json", json);
+}
+
 static const char *
 content_type_for_path(const char *path)
 {
@@ -447,6 +521,8 @@ handle_connection(int fd, struct app_web_status *status, const char *web_root,
 		handle_get_graph(fd, graph_ctx);
 	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/graph") == 0) {
 		handle_post_graph(fd, req.body != NULL ? req.body : "", req.body_len, graph_ctx);
+	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/probe-port-count") == 0) {
+		handle_probe_port_count(fd, req.body != NULL ? req.body : "", req.body_len);
 	} else if (strcmp(req.method, "GET") == 0) {
 		serve_static_file(fd, web_root, req.path);
 	} else {

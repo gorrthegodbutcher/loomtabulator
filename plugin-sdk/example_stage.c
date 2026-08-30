@@ -59,7 +59,6 @@ static const struct stage g_stage = {
 	.name = "example",
 	.in_type = PORT_TYPE_EXTRACTED,
 	.out_type = PORT_TYPE_EXTRACTED,
-	.max_out_ports = 1,
 	.init = example_init,
 	.process = example_process,
 	.teardown = example_teardown,

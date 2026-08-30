@@ -12,7 +12,6 @@ static const struct stage g_stage = {
 	.name = "validate",
 	.in_type = PORT_TYPE_RAW_RECORD,
 	.out_type = PORT_TYPE_VALIDATED,
-	.max_out_ports = 1,
 	.init = validate_stage_init,
 	.process = validate_stage_process,
 	.teardown = validate_stage_teardown,

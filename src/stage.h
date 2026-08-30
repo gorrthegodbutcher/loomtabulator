@@ -15,6 +15,14 @@
  * more than extract/convert's own small fixed-width outputs need. */
 #define STAGE_SCRATCH_BYTES 9216
 
+/* Structural cap on struct stage.out_port_count()'s return value - array
+ * sizing (pipeline.h's struct pipeline_stage_instance.children[]), not a
+ * real limit on any stage's own routing table; bump if a real plugin
+ * needs more. Lives here rather than pipeline.h since it bounds a valid
+ * out_port_count() return value - an ABI-facing contract every plugin
+ * author needs to know, not an internal engine detail. */
+#define STAGE_MAX_OUT_PORTS 16
+
 /* The pipeline processing contract - see the project plan
  * (~/.claude/plans/noble-kindling-lemon.md) for the full design
  * rationale. A "stage" is one step in a linear chain (validate ->
@@ -124,15 +132,20 @@ struct stage_record {
 struct stage_result {
 	bool ok;
 	unsigned out_port;       /* Which of the stage's declared output ports
-				    * (see struct stage.max_out_ports below)
+				    * (see struct stage.out_port_count below)
 				    * `out` targets; meaningless when ok=false.
-				    * Every stage returns 0 here today - the
-				    * pipeline engine doesn't yet execute
-				    * anything but a single successor per
-				    * stage, so nonzero has no effect yet
-				    * (and graph_config.c refuses to load any
-				    * stage type declaring more than one
-				    * output port in the first place). */
+				    * Selects which downstream node this record
+				    * continues to - graph_config.c guarantees
+				    * every value in [0, out_port_count()) is
+				    * wired to a real edge, so any value in that
+				    * range is always safe to return. Returning
+				    * a value >= this stage instance's own
+				    * declared count is a plugin bug: pipeline.c
+				    * logs it distinctly and drops the record,
+				    * rather than treating it as an ordinary
+				    * drop. A single-output stage (the common
+				    * case - see out_port_count's NULL default)
+				    * just leaves this at its zero-init value. */
 	const char *drop_reason; /* NULL if ok; always a string literal, never
 				    * heap-allocated - this runs on the hot path
 				    * once per record. */
@@ -152,18 +165,6 @@ struct stage {
 	enum stage_port_type in_type;
 	enum stage_port_type out_type;
 
-	unsigned max_out_ports;   /* Declared output port ceiling for this
-				     * stage type. Every stage shipped with
-				     * this project sets 1 (the only value
-				     * graph_config.c currently accepts - see
-				     * its own header comment). A plugin
-				     * declaring more than 1 builds and loads
-				     * fine (this is forward-compatible ABI
-				     * groundwork - see stage_abi.h's version-2
-				     * note), but graph_config.c rejects wiring
-				     * it into a graph until a later phase
-				     * actually implements routing execution. */
-
 	/* config is this node's "data.config" object straight out of the
 	 * parsed graph JSON (see graph_config.c) - each stage type pulls out
 	 * whatever fields it needs by name (json_object_get() + json_as_*()),
@@ -175,6 +176,28 @@ struct stage {
 	 * graph_config.c treats NULL as a startup-time failure (refuse to
 	 * run, clear error), never something discovered mid-run. */
 	void *(*init)(const struct json_value *config);
+
+	/* How many output ports THIS NODE INSTANCE has - NULL means "always
+	 * exactly 1," the right default for every stage shipped with this
+	 * project except forward_udp (a genuine leaf - see below). Called
+	 * once per graph node, immediately after that node's own init()
+	 * succeeds above and before that node's edges are validated
+	 * (deliberately an instance-level, config-dependent count - e.g. a
+	 * routing-table stage's port count depends on how many entries are
+	 * in that node's own config - not a fixed per-plugin-type constant);
+	 * graph_config.c caches the result and never calls this again on the
+	 * hot path. Returning a value > STAGE_MAX_OUT_PORTS is a startup
+	 * error. Returning 0 declares this node a genuine leaf:
+	 * graph_config.c then requires it to have zero outgoing edges and
+	 * out_type == PORT_TYPE_WIRE_FRAME (generalizing v1's old "the
+	 * chain's last stage must produce a wire frame" rule to "every leaf
+	 * must"). Otherwise, every port in [0, out_port_count()) must have
+	 * exactly one outgoing edge in the graph - a stage declaring N ports
+	 * but only wiring some of them is a startup error, not a silently
+	 * unreachable port. Every output port of one node instance shares
+	 * that instance's single out_type - there's no per-port output
+	 * type. */
+	unsigned (*out_port_count)(void *state);
 
 	/* The hot-path function, called once per record that reaches this
 	 * stage. in->type is always this stage's declared in_type (the

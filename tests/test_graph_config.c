@@ -5,8 +5,10 @@
 #include <fcntl.h>
 #include "../src/graph_config.h"
 
-/* graph_config.c pulls in stage_registry.c (for its forward_udp table
- * entry, DPDK-touching) - see the Makefile's own comment on why this
+/* This tier links tests/stub_stage_registry.c (a frozen stand-in for
+ * plugin_loader.c's dynamically-populated registry, plus a couple of
+ * test-only multi-port stage doubles - see that file) instead of the
+ * real dlopen() machinery - see the Makefile's own comment on why this
  * still runs as a plain host process with no EAL flags: nothing here
  * ever calls into EAL-dependent code, only forward_udp_stage_init()
  * (pure JSON parsing, no rte_* calls) - its process() is never invoked
@@ -52,7 +54,7 @@ main(void)
 	assert(strcmp(pl.stages[2].stage->name, "convert") == 0);
 	assert(strcmp(pl.stages[3].stage->name, "forward_udp") == 0);
 	for (size_t i = 0; i < pl.stage_count; i++)
-		if (pl.stages[i].stage->teardown != NULL)
+		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
 			pl.stages[i].stage->teardown(pl.stages[i].state);
 	printf("PASS: loads the v1 example graph (4 stages, correct order)\n");
 
@@ -75,9 +77,13 @@ main(void)
 	assert(!graph_config_load(write_temp_json(type_mismatch), &pl, &info, errbuf, sizeof(errbuf)));
 	printf("PASS: rejects a port-type mismatch (%s)\n", errbuf);
 
-	/* Branching graph (one node with two outgoing edges) - not a linear
-	 * chain, v1 must reject it */
-	const char *branching =
+	/* Two edges from the same single-output node's same (implicit,
+	 * default) source_port - "validate" has no out_port_count, so it
+	 * declares exactly 1 port via the NULL default, and a second edge
+	 * from it collides on that same port 0. Branching itself is legal
+	 * now (see the "wires a 2-port stage" tests below); this is
+	 * specifically the duplicate-port case. */
+	const char *duplicate_port =
 		"{\"input\":{\"ring_name\":\"R\"},"
 		"\"nodes\":["
 		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
@@ -85,19 +91,78 @@ main(void)
 		"{\"id\":\"n3\",\"type\":\"extract\",\"data\":{\"config\":{\"field_offset_bytes\":0,\"field_width_bytes\":8}}}"
 		"],"
 		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"},{\"source\":\"n1\",\"target\":\"n3\"}]}";
-	assert(!graph_config_load(write_temp_json(branching), &pl, &info, errbuf, sizeof(errbuf)));
-	printf("PASS: rejects a branching (non-chain) graph (%s)\n", errbuf);
+	assert(!graph_config_load(write_temp_json(duplicate_port), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "already has an outgoing edge") != NULL);
+	printf("PASS: rejects two edges from the same node's same output port (%s)\n", errbuf);
 
-	/* Multi-output stage (max_out_ports > 1) - graph_config.c's engine
-	 * only executes single-output chains today, so this must be
-	 * rejected at load time rather than silently misrouted at runtime */
-	const char *multi_out =
+	/* Fan-in: two edges into the same node - still rejected, unrelated
+	 * to output-port count (this build's engine is a tree, no merging
+	 * upstream paths) */
+	const char *fan_in =
 		"{\"input\":{\"ring_name\":\"R\"},"
-		"\"nodes\":[{\"id\":\"n1\",\"type\":\"multi_out_stub\",\"data\":{\"config\":{}}}],"
-		"\"edges\":[]}";
-	assert(!graph_config_load(write_temp_json(multi_out), &pl, &info, errbuf, sizeof(errbuf)));
-	assert(strstr(errbuf, "multi-port routing isn't executable yet") != NULL);
-	printf("PASS: rejects a stage declaring more than one output port (%s)\n", errbuf);
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"multi_out_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\",\"source_port\":0},"
+		"{\"source\":\"n1\",\"target\":\"n2\",\"source_port\":1}]}";
+	assert(!graph_config_load(write_temp_json(fan_in), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "more than one incoming edge") != NULL);
+	printf("PASS: rejects fan-in - a node with more than one incoming edge (%s)\n", errbuf);
+
+	/* Real branching graph: multi_out_stub (2 ports) wired to two
+	 * distinct leaf_stub nodes - the actual positive case this whole
+	 * feature is for. */
+	const char *branching =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"multi_out_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n3\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\",\"source_port\":0},"
+		"{\"source\":\"n1\",\"target\":\"n3\",\"source_port\":1}]}";
+	assert(graph_config_load(write_temp_json(branching), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(pl.stage_count == 3);
+	assert(pl.stages[pl.root_idx].stage != NULL);
+	assert(strcmp(pl.stages[pl.root_idx].stage->name, "multi_out_stub") == 0);
+	assert(pl.stages[pl.root_idx].port_count == 2);
+	assert(pl.stages[pl.root_idx].children[0] >= 0 &&
+	       strcmp(pl.stages[pl.stages[pl.root_idx].children[0]].stage->name, "leaf_stub") == 0);
+	assert(pl.stages[pl.root_idx].children[1] >= 0 &&
+	       pl.stages[pl.root_idx].children[0] != pl.stages[pl.root_idx].children[1]);
+	for (size_t i = 0; i < pl.stage_count; i++)
+		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
+			pl.stages[i].stage->teardown(pl.stages[i].state);
+	printf("PASS: loads a real branching graph (2-port stage wired to two distinct leaves)\n");
+
+	/* multi_out_stub declares 2 ports but only port 0 is wired */
+	const char *port_not_wired =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"multi_out_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\",\"source_port\":0}]}";
+	assert(!graph_config_load(write_temp_json(port_not_wired), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "has no outgoing edge") != NULL);
+	printf("PASS: rejects a stage that only wires some of its declared ports (%s)\n", errbuf);
+
+	/* multi_out_stub declares 2 ports (0,1) but an edge wires port 2 */
+	const char *port_out_of_range =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"multi_out_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n3\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n4\",\"type\":\"leaf_stub\",\"data\":{\"config\":{}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\",\"source_port\":0},"
+		"{\"source\":\"n1\",\"target\":\"n3\",\"source_port\":1},"
+		"{\"source\":\"n1\",\"target\":\"n4\",\"source_port\":2}]}";
+	assert(!graph_config_load(write_temp_json(port_out_of_range), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "only declares") != NULL);
+	printf("PASS: rejects an edge wiring a port beyond what the stage declares (%s)\n", errbuf);
 
 	/* Missing input.ring_name */
 	const char *no_ring =

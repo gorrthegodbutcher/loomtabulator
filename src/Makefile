@@ -77,8 +77,9 @@ plugin-sdk:
 
 # Five tiers, matching dpdk-app-example's own test convention:
 #  - test_stage_chain: validate/extract/convert are deliberately mbuf-free
-#    (see stage.h) - linked here with zero DPDK involvement, runs as a
-#    plain host binary, no hugepages/EAL needed.
+#    (see stage.h), and pipeline.c's tree-walking execution is pure C too
+#    (see pipeline.h) - both linked here with zero DPDK involvement, runs
+#    as a plain host binary, no hugepages/EAL needed.
 #  - test_graph_config: links tests/stub_stage_registry.c, a frozen copy
 #    of the pre-plugin-conversion static registry, instead of the real
 #    plugin_loader.c - this tier tests graph_config_load()'s chain-
@@ -104,7 +105,7 @@ plugin-sdk:
 #    lcore-launch machinery main.c itself uses.
 test: build
 	$(CC) -Wall -Wextra -I. -o build/test_stage_chain ../tests/test_stage_chain.c \
-		json.c stages/validate_stage.c stages/extract_stage.c stages/convert_stage.c
+		json.c pipeline.c stages/validate_stage.c stages/extract_stage.c stages/convert_stage.c
 	./build/test_stage_chain
 	$(CC) -Wall -Wextra -I. -o build/test_graph_config ../tests/test_graph_config.c \
 		json.c pipeline.c graph_config.c ../tests/stub_stage_registry.c common.c \

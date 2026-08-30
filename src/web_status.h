@@ -8,12 +8,17 @@
 #include <pthread.h>
 
 /* Status/API server: GET /status.json, GET /api/stage-types (Phase 3 -
- * serializes stage_registry.c's table for the web UI's palette),
- * GET /api/graph (the last-saved graph's raw JSON, for the UI to load on
- * open), POST /api/graph (validates a new graph exactly as startup does
- * and, on success, writes it to --graph=PATH's file - it does NOT
- * hot-swap the running pipeline; the response says so, and the process
- * needs a restart to actually pick it up). CLAUDE.md's Phase 3 design
+ * serializes plugin_loader.c's dynamically-populated registry for the
+ * web UI's palette), GET /api/graph (the last-saved graph's raw JSON,
+ * for the UI to load on open), POST /api/graph (validates a new graph
+ * exactly as startup does and, on success, writes it to --graph=PATH's
+ * file - it does NOT hot-swap the running pipeline; the response says
+ * so, and the process needs a restart to actually pick it up),
+ * POST /api/probe-port-count (builds one throwaway stage instance from
+ * a {"type","config"} body and reports its out_port_count() - the web
+ * UI's only way to know how many handles a multi-port node needs,
+ * since that's an instance property, not something GET /api/stage-types'
+ * per-type listing can answer). CLAUDE.md's Phase 3 design
  * sketch flagged live-reload-vs-restart as an open decision; this
  * resolves it in favor of restart, deliberately - hot-swapping the
  * running pipeline_chain would mean sharing it with epoch_barrier.c's
