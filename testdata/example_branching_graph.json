@@ -6,17 +6,13 @@
     { "id": "n1", "type": "validate", "data": { "config": { "require_magic": true }, "label": "validate" } },
     { "id": "n2", "type": "extract", "data": { "config": { "field_offset_bytes": 0, "field_width_bytes": 8 }, "label": "extract (full counter)" } },
     { "id": "n3", "type": "example_router", "data": { "config": { "routes": [ { "byte_value": 42, "port": 1 } ], "default_port": 0 }, "label": "router: low byte == 42?" } },
-    { "id": "n4", "type": "convert", "data": { "config": { "scale": 0.001, "offset": 0 }, "label": "convert (branch 0)" } },
-    { "id": "n5", "type": "forward_udp", "data": { "config": { "dst_ip": "127.0.0.1", "dst_port": 12345 }, "label": "forward_udp (branch 0 -> :12345)" } },
-    { "id": "n6", "type": "convert", "data": { "config": { "scale": 0.001, "offset": 0 }, "label": "convert (branch 1)" } },
-    { "id": "n7", "type": "forward_udp", "data": { "config": { "dst_ip": "127.0.0.1", "dst_port": 12346 }, "label": "forward_udp (branch 1 -> :12346)" } }
+    { "id": "n4", "type": "forward_udp", "data": { "config": { "dst_ip": "127.0.0.1", "dst_port": 12345 }, "label": "forward_udp (branch 0 -> :12345)" } },
+    { "id": "n5", "type": "forward_udp", "data": { "config": { "dst_ip": "127.0.0.1", "dst_port": 12346 }, "label": "forward_udp (branch 1 -> :12346)" } }
   ],
   "edges": [
     { "id": "e1", "source": "n1", "target": "n2" },
     { "id": "e2", "source": "n2", "target": "n3" },
     { "id": "e3", "source": "n3", "target": "n4", "source_port": 0 },
-    { "id": "e4", "source": "n3", "target": "n6", "source_port": 1 },
-    { "id": "e5", "source": "n4", "target": "n5" },
-    { "id": "e6", "source": "n6", "target": "n7" }
+    { "id": "e4", "source": "n3", "target": "n5", "source_port": 1 }
   ]
 }

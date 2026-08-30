@@ -15,7 +15,7 @@ fixture_process(void *state, const struct stage_record *in, struct stage_record 
 
 static const struct stage g_stage = {
 	.name = "fixture_missingversion",
-	.in_type = PORT_TYPE_RAW_RECORD,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 	.out_type = PORT_TYPE_VALIDATED,
 	.init = NULL,
 	.process = fixture_process,

@@ -214,9 +214,26 @@ handle_stage_types(int fd)
 	for (size_t i = 0; i < count && off < sizeof(json); i++) {
 		const struct stage *s = stage_registry_get(i);
 		n = snprintf(json + off, sizeof(json) - off,
-			"  { \"name\": \"%s\", \"in_type\": \"%s\", \"out_type\": \"%s\" }%s\n",
-			s->name, stage_port_type_name(s->in_type), stage_port_type_name(s->out_type),
-			i + 1 < count ? "," : "");
+			"  { \"name\": \"%s\", \"in_types\": [", s->name);
+		if (n > 0)
+			off += (size_t)n;
+
+		/* A stage's in_types is a bitmask (see stage.h) - one array
+		 * element per set bit, iterating the enum's known sequential
+		 * range same as graph_config.c's own describe_accepted_types(). */
+		bool first_type = true;
+		for (enum stage_port_type t = PORT_TYPE_RAW_RECORD; t <= PORT_TYPE_WIRE_FRAME && off < sizeof(json); t++) {
+			if (!(s->in_types & PORT_TYPE_BIT(t)))
+				continue;
+			n = snprintf(json + off, sizeof(json) - off, "%s\"%s\"",
+				      first_type ? "" : ", ", stage_port_type_name(t));
+			if (n > 0)
+				off += (size_t)n;
+			first_type = false;
+		}
+
+		n = snprintf(json + off, sizeof(json) - off, "], \"out_type\": \"%s\" }%s\n",
+			stage_port_type_name(s->out_type), i + 1 < count ? "," : "");
 		if (n > 0)
 			off += (size_t)n;
 	}

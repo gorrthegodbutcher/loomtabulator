@@ -6,7 +6,7 @@
 
 static const struct stage g_stage = {
 	.name = "convert",
-	.in_type = PORT_TYPE_EXTRACTED,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
 	.out_type = PORT_TYPE_ENGINEERING,
 	.init = convert_stage_init,
 	.process = convert_stage_process,

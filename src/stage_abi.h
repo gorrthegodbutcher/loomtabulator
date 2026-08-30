@@ -19,7 +19,7 @@
  *   const struct stage *loom_stage_entry(void);
  *       Returns a pointer to a single, static (not stack/heap)
  *       struct stage describing this plugin's one stage type - name,
- *       in_type/out_type, and its init/out_port_count/process/teardown
+ *       in_types/out_type, and its init/out_port_count/process/teardown
  *       function pointers (see stage.h). NULL is a valid "reject me"
  *       response.
  *
@@ -58,7 +58,7 @@
  * but rejected by graph_config.c at graph-load time - the pipeline
  * engine only executed single-output chains at that point.
  *
- * Version 3 (current): replaced struct stage.max_out_ports (a static
+ * Version 3: replaced struct stage.max_out_ports (a static
  * per-plugin-type ceiling) with struct stage.out_port_count(state), a
  * dynamic per-instance callback - Option 2 from
  * docs/RECOMMENDATIONS.md's own §3.2, chosen because it lets
@@ -68,8 +68,21 @@
  * validated - graph_config.c already does that. Multi-port routing is
  * now fully executable: graph_config.c builds a real tree instead of a
  * flat chain, and pipeline.c walks it by reading struct
- * stage_result.out_port at each step (see stage.h and pipeline.h). */
-#define STAGE_ABI_VERSION 3u
+ * stage_result.out_port at each step (see stage.h and pipeline.h).
+ *
+ * Version 4 (current): replaced struct stage.in_type (a single enum
+ * stage_port_type) with struct stage.in_types, a PORT_TYPE_BIT(...)
+ * bitmask - a stage can now legitimately accept more than one input
+ * type (e.g. forward_udp accepts raw_record/validated/extracted alike,
+ * since a UDP payload is just bytes regardless of which of those three
+ * produced it). graph_config.c's edge check became a membership test
+ * instead of an equality test. Also dropped the requirement that a
+ * leaf (out_port_count() == 0) must produce PORT_TYPE_WIRE_FRAME - that
+ * rule was only ever a stand-in for "ends in forward_udp," which
+ * stopped being the only kind of terminal sink once dump_binary/
+ * dump_text (both leaves, neither producing a wire frame) were added;
+ * a leaf's out_type is unused and unconstrained now. */
+#define STAGE_ABI_VERSION 4u
 
 #define STAGE_ABI_VERSION_SYMBOL "loom_stage_abi_version"
 #define STAGE_ABI_ENTRY_SYMBOL   "loom_stage_entry"

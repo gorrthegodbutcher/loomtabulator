@@ -12,6 +12,8 @@
 #include "../src/stages/extract_stage.h"
 #include "../src/stages/convert_stage.h"
 #include "../src/stages/forward_udp_stage.h"
+#include "../src/stages/dump_binary_stage.h"
+#include "../src/stages/dump_text_stage.h"
 
 /* Test-only 2-port stage, exercising graph_config.c's dynamic
  * out_port_count() wiring/validation (tests/test_graph_config.c) -
@@ -70,7 +72,7 @@ leaf_stub_process(void *state, const struct stage_record *in, struct stage_recor
 static const struct stage g_registry[] = {
 	{
 		.name = "validate",
-		.in_type = PORT_TYPE_RAW_RECORD,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 		.out_type = PORT_TYPE_VALIDATED,
 		.init = validate_stage_init,
 		.process = validate_stage_process,
@@ -78,7 +80,7 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "extract",
-		.in_type = PORT_TYPE_VALIDATED,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
 		.out_type = PORT_TYPE_EXTRACTED,
 		.init = extract_stage_init,
 		.process = extract_stage_process,
@@ -86,7 +88,7 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "convert",
-		.in_type = PORT_TYPE_EXTRACTED,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
 		.out_type = PORT_TYPE_ENGINEERING,
 		.init = convert_stage_init,
 		.process = convert_stage_process,
@@ -94,7 +96,8 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "forward_udp",
-		.in_type = PORT_TYPE_ENGINEERING,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED) |
+			    PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
 		.out_type = PORT_TYPE_WIRE_FRAME,
 		.init = forward_udp_stage_init,
 		.out_port_count = zero_out_ports,
@@ -102,8 +105,27 @@ static const struct stage g_registry[] = {
 		.teardown = forward_udp_stage_teardown,
 	},
 	{
+		.name = "dump_binary",
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED) |
+			    PORT_TYPE_BIT(PORT_TYPE_EXTRACTED) | PORT_TYPE_BIT(PORT_TYPE_WIRE_FRAME),
+		.out_type = PORT_TYPE_RAW_RECORD,
+		.init = dump_binary_stage_init,
+		.out_port_count = zero_out_ports,
+		.process = dump_binary_stage_process,
+		.teardown = dump_binary_stage_teardown,
+	},
+	{
+		.name = "dump_text",
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_ENGINEERING),
+		.out_type = PORT_TYPE_ENGINEERING,
+		.init = dump_text_stage_init,
+		.out_port_count = zero_out_ports,
+		.process = dump_text_stage_process,
+		.teardown = dump_text_stage_teardown,
+	},
+	{
 		.name = "multi_out_stub",
-		.in_type = PORT_TYPE_RAW_RECORD,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 		.out_type = PORT_TYPE_VALIDATED,
 		.init = validate_stage_init,
 		.out_port_count = multi_out_stub_port_count,
@@ -112,7 +134,7 @@ static const struct stage g_registry[] = {
 	},
 	{
 		.name = "leaf_stub",
-		.in_type = PORT_TYPE_VALIDATED,
+		.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
 		.out_type = PORT_TYPE_WIRE_FRAME,
 		.init = validate_stage_init,
 		.out_port_count = zero_out_ports,

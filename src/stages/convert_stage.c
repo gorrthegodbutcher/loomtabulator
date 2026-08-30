@@ -47,10 +47,14 @@ convert_stage_process(void *state, const struct stage_record *in, struct stage_r
 	double engineering = (double)raw * cfg->scale + cfg->offset;
 
 	/* Host byte order (x86_64, always little-endian for this project's
-	 * deployment target) - this is an internal pipeline value, not yet
-	 * on the wire. forward_udp_stage.c is what re-encodes it as bytes
-	 * for actual transmission, and does its own big-endian conversion
-	 * there since that value genuinely does go on the wire. */
+	 * deployment target) - this is an internal pipeline value, an
+	 * opaque double bit pattern, not yet encoded for any particular
+	 * destination. forward_udp doesn't accept PORT_TYPE_ENGINEERING at
+	 * all (a double isn't just an opaque byte blob the way
+	 * raw_record/validated/extracted are - see forward_udp_stage.c's
+	 * own header comment); dump_text_stage.c is the built-in consumer
+	 * that knows how to turn this into a specific on-disk encoding
+	 * (ASCII text). */
 	memcpy(out->data, &engineering, sizeof(engineering));
 	out->type = PORT_TYPE_ENGINEERING;
 	out->len = sizeof(engineering);

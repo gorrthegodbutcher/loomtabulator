@@ -33,9 +33,11 @@ struct graph_config_result {
 
 /* Reads path, parses it as JSON, validates it against the schema above
  * (node types exist in plugin_loader.c's dynamically-populated
- * registry, every edge's port types match, the graph is a tree from a
- * PORT_TYPE_RAW_RECORD-input root to one or more PORT_TYPE_WIRE_FRAME
- * leaves), and on success calls init()/out_port_count() on every stage
+ * registry, every edge's source out_type is one of its target's
+ * accepted in_types, the graph is a tree from a PORT_TYPE_RAW_RECORD-
+ * input root to one or more leaves - a leaf's own out_type is
+ * unconstrained, see stage.h's out_port_count comment), and on success
+ * calls init()/out_port_count() on every stage
  * instance, populating pl->stages/stage_count/root_idx. On any failure,
  * writes a human-readable message into errbuf and returns false - this
  * is always a startup-time failure (see stage.h's own header comment on

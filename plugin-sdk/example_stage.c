@@ -57,7 +57,7 @@ example_teardown(void *state)
  * is just this example's arbitrary choice. */
 static const struct stage g_stage = {
 	.name = "example",
-	.in_type = PORT_TYPE_EXTRACTED,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
 	.out_type = PORT_TYPE_EXTRACTED,
 	.init = example_init,
 	.process = example_process,

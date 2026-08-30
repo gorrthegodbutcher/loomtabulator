@@ -26,13 +26,20 @@ export interface StageNodeData extends Record<string, unknown> {
                        // node is a blank box
   type: string;      // plugin_loader.c's stage name - the JSON schema's node "type"
   config: unknown;    // opaque; round-tripped as-is, not editable yet
-  inType: string;
+  inTypes: string[]; // a stage can accept more than one input type (see
+                       // stage.h's PORT_TYPE_BIT) - empty means "no target
+                       // handle" (only the synthetic ring-input node).
   outType: string;
   outPortCount: number; // how many source handles StageNode.tsx draws -
                           // an INSTANCE property (depends on this node's
                           // own config, see stage.h's out_port_count),
                           // so it comes from probePortCount() below, not
                           // from stageTypes.ts's per-type listing.
+  targetConnectedColor: string | null; // computed by App.tsx (a node has
+                          // at most one incoming edge) - null means
+                          // "no incoming edge yet", so StageNode.tsx
+                          // shows a neutral target handle rather than
+                          // implying it only accepts one type.
 }
 
 export interface GraphMeta {
@@ -71,6 +78,29 @@ export interface FetchedGraph {
   meta: GraphMeta;
   nodes: Node<StageNodeData>[];
   edges: Edge[];
+}
+
+/* One fixed, categorical color per stage_port_type (src/stage.h's
+ * enum) - lets an edge's color (App.tsx) and a node's handle colors
+ * (StageNode.tsx) both key off the exact same type name, so "this
+ * connector point" and "this line" always visually agree, same as
+ * `outType === inType` already has to agree for the connection to be
+ * valid in the first place. Deliberately avoids --good/--critical
+ * (already mean success/error elsewhere in this UI, not a data type)
+ * and --accent (used for other UI chrome, not tied to a single port
+ * type) - fixed hex values instead, chosen to stay legible against
+ * both index.css themes rather than switching with them. */
+const PORT_TYPE_COLORS: Record<string, string> = {
+  raw_record: "#8b5cf6",
+  validated: "#3b82f6",
+  extracted: "#f59e0b",
+  engineering: "#ec4899",
+  wire_frame: "#06b6d4",
+  none: "var(--border)",
+};
+
+export function colorForPortType(type: string): string {
+  return PORT_TYPE_COLORS[type] ?? "var(--text-mute)";
 }
 
 /* Look and feel matched to dpdk-app-example's own status console (its
@@ -126,9 +156,10 @@ export function makeRingInputNode(x: number, y: number): Node<StageNodeData> {
       label: "\u{1F4E5} DPDK Ring Buffer",
       type: "__ring_input__",
       config: {},
-      inType: "none",
+      inTypes: [],
       outType: "raw_record",
       outPortCount: 1,
+      targetConnectedColor: null,
     },
   };
 }
@@ -184,9 +215,10 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
         label: n.data?.label ?? `${n.type} (${n.id})`,
         type: n.type,
         config: n.data?.config ?? {},
-        inType: st?.in_type ?? "unknown",
+        inTypes: st?.in_types ?? [],
         outType: st?.out_type ?? "unknown",
         outPortCount: portCounts[i],
+        targetConnectedColor: null, // filled in by App.tsx's useMemo
       },
     };
   });

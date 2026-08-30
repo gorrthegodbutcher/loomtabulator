@@ -3,8 +3,10 @@
 
 #include "../stage.h"
 
-/* PORT_TYPE_ENGINEERING -> PORT_TYPE_WIRE_FRAME - the terminal stage of
- * every v1 graph. Transmits via a plain kernel UDP socket, one per
+/* raw_record/validated/extracted -> PORT_TYPE_WIRE_FRAME - a terminal
+ * stage (one of two now - see dump_binary_stage.h/dump_text_stage.h
+ * for the file-writing alternatives). Transmits via a plain kernel UDP
+ * socket, one per
  * stage instance (created in init(), closed in teardown()) - unlike an
  * earlier DPDK-NIC-based version of this file, there's no process-wide
  * runtime context to set up before graph_config_load() (no shared mbuf

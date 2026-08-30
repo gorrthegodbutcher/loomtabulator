@@ -19,7 +19,8 @@ forward_udp_out_port_count(void *state)
 
 static const struct stage g_stage = {
 	.name = "forward_udp",
-	.in_type = PORT_TYPE_ENGINEERING,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED) |
+		    PORT_TYPE_BIT(PORT_TYPE_EXTRACTED),
 	.out_type = PORT_TYPE_WIRE_FRAME,
 	.init = forward_udp_stage_init,
 	.out_port_count = forward_udp_out_port_count,

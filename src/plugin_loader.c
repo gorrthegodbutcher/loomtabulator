@@ -66,6 +66,29 @@ is_so_file(const struct dirent *entry)
 	return len > 3 && strcmp(entry->d_name + len - 3, ".so") == 0;
 }
 
+/* Renders in_types' set bits as a human-readable comma list for the
+ * startup load-confirmation log line below - a smaller, log-only
+ * cousin of graph_config.c's own describe_accepted_types() (that one
+ * feeds a graph-validation error message; this one's just stderr
+ * output, so a fixed-size stack buffer is fine either way). Iterates
+ * the enum's known sequential range (PORT_TYPE_RAW_RECORD..
+ * PORT_TYPE_WIRE_FRAME); update this if stage_port_type ever gains a
+ * non-sequential value. */
+static void
+describe_in_types(unsigned in_types, char *buf, size_t buf_len)
+{
+	size_t off = 0;
+	buf[0] = '\0';
+	for (enum stage_port_type t = PORT_TYPE_RAW_RECORD; t <= PORT_TYPE_WIRE_FRAME; t++) {
+		if (!(in_types & PORT_TYPE_BIT(t)))
+			continue;
+		int n = snprintf(buf + off, buf_len - off, "%s%s",
+				  off > 0 ? "|" : "", stage_port_type_name(t));
+		if (n > 0)
+			off += (size_t)n;
+	}
+}
+
 /* Loads and validates one plugin. Returns false ONLY for a fatal
  * condition (name collision, registry full) - an individual plugin
  * that's malformed in its own right (won't dlopen, missing an export,
@@ -128,9 +151,10 @@ load_one_plugin(const char *path, char *errbuf, size_t errbuf_len)
 		return false;
 	}
 
+	char in_types_desc[128];
+	describe_in_types(stage->in_types, in_types_desc, sizeof(in_types_desc));
 	fprintf(stderr, "loomtabulator: loaded plugin '%s': stage '%s' (%s -> %s)\n",
-		path, stage->name, stage_port_type_name(stage->in_type),
-		stage_port_type_name(stage->out_type));
+		path, stage->name, in_types_desc, stage_port_type_name(stage->out_type));
 
 	g_registry[g_count] = stage;
 	g_handles[g_count] = handle;

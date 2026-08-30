@@ -7,6 +7,8 @@
 #include "../src/stages/validate_stage.h"
 #include "../src/stages/extract_stage.h"
 #include "../src/stages/convert_stage.h"
+#include "../src/stages/dump_binary_stage.h"
+#include "../src/stages/dump_text_stage.h"
 #include "../src/pipeline.h"
 
 /* DPDK-free: validate/extract/convert are all deliberately mbuf-free
@@ -66,7 +68,7 @@ router_port_count(void *state)
 
 static const struct stage router_stage = {
 	.name = "test_router",
-	.in_type = PORT_TYPE_RAW_RECORD,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
 	.out_type = PORT_TYPE_VALIDATED,
 	.out_port_count = router_port_count,
 	.process = router_process,
@@ -93,7 +95,7 @@ leaf_port_count(void *state)
 
 static const struct stage leaf_stage = {
 	.name = "test_leaf",
-	.in_type = PORT_TYPE_VALIDATED,
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
 	.out_type = PORT_TYPE_WIRE_FRAME,
 	.out_port_count = leaf_port_count,
 	.process = leaf_process,
@@ -143,6 +145,60 @@ run_routing_test(void)
 	assert(leaf1_hit && !leaf0_hit);
 	assert(atomic_load(&counters.records_forwarded) == 2);
 	printf("PASS: pipeline_run() routes an odd-first-byte record to port 1's child, not port 0's\n");
+}
+
+/* dump_binary/dump_text are exercised directly (init/process/teardown,
+ * no graph_config.c involved) then read back - the only place either
+ * stage's actual file-writing behavior is verified. */
+static void
+run_dump_stage_tests(void)
+{
+	struct json_value *binary_cfg = parse_or_die("{\"path\": \"build/test_dump_binary.bin\"}");
+	void *binary_state = dump_binary_stage_init(binary_cfg);
+	assert(binary_state != NULL);
+
+	uint8_t chunk1[3] = { 0x01, 0x02, 0x03 };
+	struct stage_record bin_in1 = { .data = chunk1, .len = sizeof(chunk1) };
+	struct stage_record bin_out1 = {0};
+	assert(dump_binary_stage_process(binary_state, &bin_in1, &bin_out1).ok);
+
+	uint8_t chunk2[2] = { 0xaa, 0xbb };
+	struct stage_record bin_in2 = { .data = chunk2, .len = sizeof(chunk2) };
+	struct stage_record bin_out2 = {0};
+	assert(dump_binary_stage_process(binary_state, &bin_in2, &bin_out2).ok);
+
+	dump_binary_stage_teardown(binary_state);
+
+	FILE *bf = fopen("build/test_dump_binary.bin", "rb");
+	assert(bf != NULL);
+	uint8_t readback[5];
+	assert(fread(readback, 1, sizeof(readback), bf) == sizeof(readback));
+	fclose(bf);
+	assert(memcmp(readback, "\x01\x02\x03\xaa\xbb", 5) == 0);
+	printf("PASS: dump_binary_stage writes each record's bytes verbatim, back to back\n");
+
+	struct json_value *text_cfg = parse_or_die("{\"path\": \"build/test_dump_text.txt\"}");
+	void *text_state = dump_text_stage_init(text_cfg);
+	assert(text_state != NULL);
+
+	double value = 42.5;
+	uint8_t value_bytes[8];
+	memcpy(value_bytes, &value, sizeof(value));
+	struct stage_record text_in = { .data = value_bytes, .len = sizeof(value_bytes) };
+	struct stage_record text_out = {0};
+	assert(dump_text_stage_process(text_state, &text_in, &text_out).ok);
+
+	dump_text_stage_teardown(text_state);
+
+	FILE *tf = fopen("build/test_dump_text.txt", "rb");
+	assert(tf != NULL);
+	char text_buf[64] = {0};
+	size_t n = fread(text_buf, 1, sizeof(text_buf) - 1, tf);
+	fclose(tf);
+	assert(n > 0 && text_buf[n - 1] == '\r'); /* carriage return, not '\n' - see
+						      dump_text_stage.c's own comment */
+	assert(strstr(text_buf, "42.5") != NULL);
+	printf("PASS: dump_text_stage writes an ASCII value with a trailing carriage return\n");
 }
 
 static void
@@ -267,6 +323,7 @@ main(void)
 	convert_stage_teardown(convert2_state);
 
 	run_routing_test();
+	run_dump_stage_tests();
 
 	printf("\nALL TESTS PASSED\n");
 	return 0;

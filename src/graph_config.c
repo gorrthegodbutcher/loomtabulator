@@ -74,6 +74,27 @@ find_node_idx(struct node_info *nodes, size_t count, const char *id, size_t *out
 	return false;
 }
 
+/* Renders in_types' set bits as a human-readable comma list (e.g.
+ * "raw_record, validated, extracted") for an edge-mismatch error
+ * message - reuses stage_port_type_name() (plugin_loader.h) rather
+ * than hardcoding names here too. Iterates the enum's known sequential
+ * range (PORT_TYPE_RAW_RECORD..PORT_TYPE_WIRE_FRAME); update this if
+ * stage_port_type ever gains a non-sequential value. */
+static void
+describe_accepted_types(unsigned in_types, char *buf, size_t buf_len)
+{
+	size_t off = 0;
+	buf[0] = '\0';
+	for (enum stage_port_type t = PORT_TYPE_RAW_RECORD; t <= PORT_TYPE_WIRE_FRAME; t++) {
+		if (!(in_types & PORT_TYPE_BIT(t)))
+			continue;
+		int n = snprintf(buf + off, buf_len - off, "%s%s",
+				  off > 0 ? ", " : "", stage_port_type_name(t));
+		if (n > 0)
+			off += (size_t)n;
+	}
+}
+
 bool
 graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_config_result *out,
 		   char *errbuf, size_t errbuf_len)
@@ -213,10 +234,13 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 			snprintf(errbuf, errbuf_len, "node '%s': unknown stage type '%s'", n->id, n->type);
 			goto teardown_and_fail;
 		}
-		if (stage->in_type != n->expected_in) {
+		if (!(stage->in_types & PORT_TYPE_BIT(n->expected_in))) {
+			char accepted[160];
+			describe_accepted_types(stage->in_types, accepted, sizeof(accepted));
 			snprintf(errbuf, errbuf_len,
-				 "node '%s' (type '%s'): expects an input this chain doesn't produce here",
-				 n->id, n->type);
+				 "node '%s' (type '%s'): doesn't accept an input of type '%s' here "
+				 "(accepts: %s)",
+				 n->id, n->type, stage_port_type_name(n->expected_in), accepted);
 			goto teardown_and_fail;
 		}
 		void *state = stage->init(n->config);
@@ -238,15 +262,12 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 				stage->teardown(state);
 			goto teardown_and_fail;
 		}
-		if (port_count == 0 && stage->out_type != PORT_TYPE_WIRE_FRAME) {
-			snprintf(errbuf, errbuf_len,
-				 "node '%s' (type '%s') is a leaf (declares 0 output ports) "
-				 "but doesn't produce a wire frame - every leaf must end in "
-				 "a forwarding stage", n->id, n->type);
-			if (stage->teardown != NULL)
-				stage->teardown(state);
-			goto teardown_and_fail;
-		}
+		/* No constraint on a leaf's (port_count == 0) out_type - see
+		 * stage.h's out_port_count comment for why: nothing ever reads
+		 * a leaf's *out, so any out_type is fine (there's more than one
+		 * legitimate kind of terminal sink now - forward_udp transmits,
+		 * dump_binary/dump_text write to a file - so requiring
+		 * PORT_TYPE_WIRE_FRAME specifically no longer makes sense). */
 
 		chain->stages[idx].stage = stage;
 		chain->stages[idx].state = state;

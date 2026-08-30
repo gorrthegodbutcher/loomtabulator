@@ -1,1 +1,16 @@
-{"loomtabulator_graph_version":1,"name":"v1-example-pipeline","input":{"ring_name":"LOOM_INPUT_RING","ring_size":4096,"record_type":"chrono_record_hdr_v2"},"nodes":[{"id":"n1","type":"validate","position":{"x":-378.3477690288714,"y":149.0813648293963},"data":{"config":{"require_magic":true},"label":"Custom Validator"}},{"id":"n2","type":"extract","position":{"x":-378.9763779527559,"y":201.63910761154852},"data":{"config":{"field_offset_bytes":0,"field_width_bytes":8},"label":"My Extractor"}},{"id":"n3","type":"convert","position":{"x":-380.56955380577426,"y":259.83070866141736},"data":{"config":{"scale":0.001,"offset":0},"label":"convert (n3)"}},{"id":"n4","type":"forward_udp","position":{"x":-383.45013123359576,"y":324.8937007874016},"data":{"config":{"dst_ip":"127.0.0.1","dst_port":12345},"label":"forward_udp (n4)"}}],"edges":[{"id":"e1","source":"n1","target":"n2"},{"id":"e2","source":"n2","target":"n3"},{"id":"e3","source":"n3","target":"n4"}]}
+{
+  "loomtabulator_graph_version": 1,
+  "name": "v1-example-pipeline",
+  "input": { "ring_name": "LOOM_INPUT_RING", "ring_size": 4096, "record_type": "chrono_record_hdr_v2" },
+  "nodes": [
+    { "id": "n1", "type": "validate", "position": { "x": 40, "y": 100 }, "data": { "config": { "require_magic": true }, "label": "validate" } },
+    { "id": "n2", "type": "extract", "position": { "x": 240, "y": 100 }, "data": { "config": { "field_offset_bytes": 0, "field_width_bytes": 8 }, "label": "extract" } },
+    { "id": "n3", "type": "convert", "position": { "x": 440, "y": 100 }, "data": { "config": { "scale": 0.001, "offset": 0 }, "label": "convert" } },
+    { "id": "n4", "type": "dump_text", "position": { "x": 640, "y": 100 }, "data": { "config": { "path": "build/example_output.txt" }, "label": "dump_text" } }
+  ],
+  "edges": [
+    { "id": "e1", "source": "n1", "target": "n2" },
+    { "id": "e2", "source": "n2", "target": "n3" },
+    { "id": "e3", "source": "n3", "target": "n4" }
+  ]
+}

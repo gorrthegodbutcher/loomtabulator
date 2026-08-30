@@ -153,18 +153,30 @@ directly: `./build/test_epoch_barrier`.
   does no sandboxing or vetting of plugins beyond the ABI-version
   check, an accepted tradeoff given it already runs in a container,
   not something the loader tries to mitigate. `STAGE_ABI_VERSION` is
-  currently `3` - `struct stage.out_port_count(state)` (a dynamic,
-  per-graph-node callback - `NULL` means "always 1 port," the right
-  default for every stage except a genuine leaf) replaced an earlier,
-  short-lived `max_out_ports` static ceiling, and `struct
+  currently `4`. Version 3: `struct stage.out_port_count(state)` (a
+  dynamic, per-graph-node callback - `NULL` means "always 1 port," the
+  right default for every stage except a genuine leaf) replaced an
+  earlier, short-lived `max_out_ports` static ceiling, and `struct
   stage_result.out_port`/`struct stage_record.flags` round out the rest
   - all requested by `docs/RECOMMENDATIONS.md`. Multi-output routing is
-  now fully executable: `graph_config.c` builds a tree (still capped at
+  fully executable: `graph_config.c` builds a tree (still capped at
   in-degree ≤ 1 - no merging upstream paths, see its own header
   comment) instead of a flat chain, and `pipeline.c` walks it by
   reading `stage_result.out_port` at each step - see
   `plugin-sdk/README.md`'s "Output ports" section for the plugin-author
-  side of this.
+  side of this. Version 4: `struct stage.in_type` (a single value)
+  became `in_types`, a `PORT_TYPE_BIT(...)` bitmask - a stage can
+  legitimately accept more than one input type now (`forward_udp`
+  accepts `raw_record`/`validated`/`extracted` alike, since a UDP
+  payload is just bytes regardless of which of those three produced
+  it, but deliberately not `engineering` - see
+  `forward_udp_stage.c`'s own header comment for why a double needs an
+  explicit encoding step first). This also dropped the requirement
+  that a leaf (`out_port_count() == 0`) must produce
+  `PORT_TYPE_WIRE_FRAME` - that was only ever a stand-in for "ends in
+  `forward_udp`," which stopped being the only kind of terminal sink
+  once `dump_binary`/`dump_text` (new built-ins, neither producing a
+  wire frame - see "Stage types" in `README.md`) were added.
 - **Startup-time validation over hot-path error handling.** A bad graph
   config is a refuse-to-run startup failure (`graph_config_load()`
   returning false with a clear message), never something discovered

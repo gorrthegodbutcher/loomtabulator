@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -21,6 +21,7 @@ import {
   saveGraph,
   makeRingInputNode,
   probePortCount,
+  colorForPortType,
   STAGE_NODE_STYLE,
   RING_INPUT_NODE_ID,
   type StageNodeData,
@@ -92,8 +93,8 @@ function App() {
     (connection: Connection) => {
       const source = nodes.find((n) => n.id === connection.source);
       const target = nodes.find((n) => n.id === connection.target);
-      if (!source || !target || source.data.outType !== target.data.inType) {
-        return; // mirrors graph_config.c's port-type edge validation
+      if (!source || !target || !target.data.inTypes.includes(source.data.outType)) {
+        return; // mirrors graph_config.c's port-type membership check
       }
       // mirrors graph_config.c's "output port already has an outgoing
       // edge" check - immediate feedback only, Save remains the
@@ -122,9 +123,10 @@ function App() {
           label: `${stage.name} (${id})`,
           type: stage.name,
           config: {},
-          inType: stage.in_type,
+          inTypes: stage.in_types,
           outType: stage.out_type,
           outPortCount,
+          targetConnectedColor: null, // filled in by the useMemo below
         },
       },
     ]);
@@ -235,6 +237,40 @@ function App() {
 
   const contextMenuNode = contextMenu ? nodes.find((n) => n.id === contextMenu.nodeId) : undefined;
 
+  // Color each edge by the data type actually flowing through it (its
+  // source node's outType) rather than one flat accent color, matching
+  // StageNode.tsx's handle coloring - a derived render-time transform,
+  // never fed back into `edges` state, so it always reflects each
+  // node's current outType (e.g. after a Configure edit) with no risk
+  // of going stale.
+  const coloredEdges = useMemo(
+    () =>
+      edges.map((e) => {
+        const source = nodes.find((n) => n.id === e.source);
+        const color = colorForPortType(source?.data.outType ?? "none");
+        return { ...e, style: { ...e.style, stroke: color, strokeWidth: 2 } };
+      }),
+    [edges, nodes],
+  );
+
+  // A node's target handle can now accept several types at once (see
+  // graphApi.ts's StageNodeData.inTypes), so there's no single
+  // obviously-correct color for it while unconnected. Once it has a
+  // real incoming edge (at most one - fan-in isn't supported), tint it
+  // to match that edge's actual live type, same color coloredEdges
+  // already gives the edge itself; StageNode.tsx falls back to a
+  // neutral color when this is null.
+  const nodesWithTargetColor = useMemo(
+    () =>
+      nodes.map((n) => {
+        const incoming = edges.find((e) => e.target === n.id);
+        const sourceNode = incoming ? nodes.find((sn) => sn.id === incoming.source) : undefined;
+        const targetConnectedColor = sourceNode ? colorForPortType(sourceNode.data.outType) : null;
+        return { ...n, data: { ...n.data, targetConnectedColor } };
+      }),
+    [nodes, edges],
+  );
+
   return (
     <div style={{ display: "flex", height: "100vh", background: "var(--bg)" }}>
       <aside
@@ -257,7 +293,7 @@ function App() {
             key={stage.name}
             className="palette-btn"
             onClick={() => addStageNode(stage)}
-            title={`${stage.in_type} -> ${stage.out_type}`}
+            title={`${stage.in_types.join(", ")} -> ${stage.out_type}`}
           >
             {stage.name}
           </button>
@@ -291,8 +327,8 @@ function App() {
       </aside>
       <main style={{ flex: 1, position: "relative" }}>
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={nodesWithTargetColor}
+          edges={coloredEdges}
           nodeTypes={NODE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
@@ -302,7 +338,6 @@ function App() {
           onNodeClick={closeContextMenu}
           onMoveStart={closeContextMenu}
           deleteKeyCode={["Backspace", "Delete"]}
-          defaultEdgeOptions={{ style: { stroke: "var(--accent)", strokeWidth: 2 } }}
           style={{ background: "var(--bg)" }}
           fitView
         >

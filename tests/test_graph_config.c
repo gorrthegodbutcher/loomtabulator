@@ -52,7 +52,7 @@ main(void)
 	assert(strcmp(pl.stages[0].stage->name, "validate") == 0);
 	assert(strcmp(pl.stages[1].stage->name, "extract") == 0);
 	assert(strcmp(pl.stages[2].stage->name, "convert") == 0);
-	assert(strcmp(pl.stages[3].stage->name, "forward_udp") == 0);
+	assert(strcmp(pl.stages[3].stage->name, "dump_text") == 0);
 	for (size_t i = 0; i < pl.stage_count; i++)
 		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
 			pl.stages[i].stage->teardown(pl.stages[i].state);
@@ -75,7 +75,63 @@ main(void)
 		"],"
 		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"}]}";
 	assert(!graph_config_load(write_temp_json(type_mismatch), &pl, &info, errbuf, sizeof(errbuf)));
-	printf("PASS: rejects a port-type mismatch (%s)\n", errbuf);
+	assert(strstr(errbuf, "doesn't accept an input of type 'validated'") != NULL);
+	assert(strstr(errbuf, "accepts: extracted") != NULL);
+	printf("PASS: rejects a port-type mismatch, listing the accepted type(s) (%s)\n", errbuf);
+
+	/* forward_udp now accepts more than one input type - validated
+	 * directly (skipping extract/convert entirely) must succeed. */
+	const char *multi_type_accept =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"forward_udp\",\"data\":{\"config\":{\"dst_ip\":\"127.0.0.1\",\"dst_port\":1}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"}]}";
+	assert(graph_config_load(write_temp_json(multi_type_accept), &pl, &info, errbuf, sizeof(errbuf)));
+	for (size_t i = 0; i < pl.stage_count; i++)
+		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
+			pl.stages[i].stage->teardown(pl.stages[i].state);
+	printf("PASS: forward_udp accepts 'validated' directly (one of several accepted types)\n");
+
+	/* ...but still rejects 'engineering' specifically (that's the whole
+	 * point of the change - a double isn't an opaque byte blob the way
+	 * raw_record/validated/extracted are). */
+	const char *engineering_rejected =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"extract\",\"data\":{\"config\":{\"field_offset_bytes\":0,\"field_width_bytes\":8}}},"
+		"{\"id\":\"n3\",\"type\":\"convert\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n4\",\"type\":\"forward_udp\",\"data\":{\"config\":{\"dst_ip\":\"127.0.0.1\",\"dst_port\":1}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"},{\"source\":\"n2\",\"target\":\"n3\"},"
+		"{\"source\":\"n3\",\"target\":\"n4\"}]}";
+	assert(!graph_config_load(write_temp_json(engineering_rejected), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "doesn't accept an input of type 'engineering'") != NULL);
+	assert(strstr(errbuf, "raw_record") != NULL && strstr(errbuf, "validated") != NULL &&
+	       strstr(errbuf, "extracted") != NULL);
+	printf("PASS: forward_udp still rejects 'engineering' specifically (%s)\n", errbuf);
+
+	/* A leaf whose out_type isn't wire_frame (dump_text's is engineering)
+	 * loads successfully - the old "every leaf must produce a wire
+	 * frame" rule is gone now that there's more than one kind of
+	 * terminal sink. */
+	const char *non_wire_frame_leaf =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":["
+		"{\"id\":\"n1\",\"type\":\"validate\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n2\",\"type\":\"extract\",\"data\":{\"config\":{\"field_offset_bytes\":0,\"field_width_bytes\":8}}},"
+		"{\"id\":\"n3\",\"type\":\"convert\",\"data\":{\"config\":{}}},"
+		"{\"id\":\"n4\",\"type\":\"dump_text\",\"data\":{\"config\":{\"path\":\"build/test_graph_config_dump.txt\"}}}"
+		"],"
+		"\"edges\":[{\"source\":\"n1\",\"target\":\"n2\"},{\"source\":\"n2\",\"target\":\"n3\"},"
+		"{\"source\":\"n3\",\"target\":\"n4\"}]}";
+	assert(graph_config_load(write_temp_json(non_wire_frame_leaf), &pl, &info, errbuf, sizeof(errbuf)));
+	for (size_t i = 0; i < pl.stage_count; i++)
+		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
+			pl.stages[i].stage->teardown(pl.stages[i].state);
+	printf("PASS: a leaf with a non-wire_frame out_type (dump_text) loads successfully\n");
 
 	/* Two edges from the same single-output node's same (implicit,
 	 * default) source_port - "validate" has no out_port_count, so it

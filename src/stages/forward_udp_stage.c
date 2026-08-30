@@ -7,11 +7,18 @@
 #include "forward_udp_stage.h"
 #include "../common.h"
 
-/* PORT_TYPE_ENGINEERING -> PORT_TYPE_WIRE_FRAME (and, unlike every other
- * stage, actually transmits). v1 sends the engineering-units double as
- * an 8-byte big-endian UDP payload, one packet per record, no batching -
- * a known, deliberate v1 simplification (see the project plan's Phase 2
- * notes on multi-core batching); correctness first, throughput later.
+/* raw_record/validated/extracted -> PORT_TYPE_WIRE_FRAME (and, unlike
+ * every other stage, actually transmits). Ships in->data verbatim as
+ * the UDP payload, one packet per record, no batching - a known,
+ * deliberate v1 simplification (see the project plan's Phase 2 notes
+ * on multi-core batching); correctness first, throughput later.
+ * Deliberately does NOT accept PORT_TYPE_ENGINEERING - a double is a
+ * single host-order numeric value, not an opaque byte blob, so sending
+ * its raw bytes on the wire would be an unstated, architecture-specific
+ * encoding no receiver could safely assume; a stage that wants to
+ * transmit calibrated values needs to explicitly decide how to encode
+ * them first (see dump_text_stage.c for a text-file example of doing
+ * exactly that, or write your own).
  *
  * A plain kernel UDP socket, not DPDK TX: the output/forward mechanism
  * was always flagged as a genuinely open decision (see CLAUDE.md's
@@ -38,15 +45,6 @@ struct forward_config {
 	int sock_fd;
 	struct sockaddr_in dst_addr;
 };
-
-static void
-put_be64(uint8_t *p, uint64_t v)
-{
-	for (int i = 7; i >= 0; i--) {
-		p[i] = (uint8_t)v;
-		v >>= 8;
-	}
-}
 
 void *
 forward_udp_stage_init(const struct json_value *config)
@@ -111,26 +109,19 @@ forward_udp_stage_process(void *state, const struct stage_record *in, struct sta
 {
 	struct forward_config *cfg = state;
 
-	if (in->len != 8)
-		return (struct stage_result){ .ok = false, .drop_reason = "expected 8-byte engineering value" };
-
-	/* in->data holds a host-order double (see convert_stage.c) - the
-	 * bit pattern, reinterpreted as a uint64_t, is what actually goes
-	 * on the wire, big-endian, same as every other multi-byte field
-	 * this project family ever puts on the wire. */
-	uint8_t payload[8];
-	uint64_t bits;
-	memcpy(&bits, in->data, sizeof(bits));
-	put_be64(payload, bits);
-
-	memcpy(out->data, payload, sizeof(payload));
+	/* Verbatim - in->data is already an opaque byte blob regardless of
+	 * which of raw_record/validated/extracted produced it (see this
+	 * file's own header comment for why PORT_TYPE_ENGINEERING isn't
+	 * accepted here at all), so there's nothing to reinterpret or
+	 * byte-swap, just bytes on the wire exactly as received. */
+	memcpy(out->data, in->data, in->len);
 	out->type = PORT_TYPE_WIRE_FRAME;
-	out->len = sizeof(payload);
+	out->len = in->len;
 	out->capture_tsc = in->capture_tsc;
 
-	ssize_t sent = sendto(cfg->sock_fd, payload, sizeof(payload), 0,
+	ssize_t sent = sendto(cfg->sock_fd, in->data, in->len, 0,
 			       (struct sockaddr *)&cfg->dst_addr, sizeof(cfg->dst_addr));
-	if (sent != (ssize_t)sizeof(payload))
+	if (sent != (ssize_t)in->len)
 		return (struct stage_result){ .ok = false, .drop_reason = "sendto() failed" };
 
 	return (struct stage_result){ .ok = true };

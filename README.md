@@ -30,17 +30,18 @@ A pipeline is a tree rooted at the input ring: most nodes have exactly
 one output, but a stage can declare more than one (see "Stage types"
 below and `plugin-sdk/README.md`'s "Output ports") and route each
 record to one of them - `testdata/example_branching_graph.json` is a
-real, loadable example. Every path through the tree still ends in a
-UDP-forwarding stage. As of Phase 2, the chain runs across multiple worker lcores
+real, loadable example. Every path through the tree ends in a leaf -
+either a UDP-forwarding stage or a file-dumping one (see "Stage types"
+below for both). As of Phase 2, the chain runs across multiple worker lcores
 (`--workers=N`) pulling competitively off the input ring, with an
 epoch/watermark barrier (`src/epoch_barrier.c`) ensuring all of one
 epoch's records finish before the next epoch's are considered started
 - see `CLAUDE.md` for the mechanism.
 
 ```
-                              +-> [worker 1: validate -> extract -> convert -> forward_udp] -+
-[testgen thread] --rte_ring-> +-> [worker 2: ...........................................] -+--> UDP (kernel socket)
-                              +-> [worker N: ...........................................] -+
+                              +-> [worker 1: validate -> extract -> convert -> dump_text] -+
+[testgen thread] --rte_ring-> +-> [worker 2: ......................................... ] -+--> a file, or UDP
+                              +-> [worker N: ......................................... ] -+
 ```
 
 ## Prerequisites
@@ -76,10 +77,13 @@ available unless `plugins/` exists and is populated, or
 ```
 
 - `--graph=PATH` (required) - the JSON pipeline definition to load. See
-  `testdata/example_graph.json` for the v1 shape: `input` (the ring to
-  create), `nodes` (stage instances, each a `type` matching a compiled-in
-  stage and a `data.config` block), `edges` (must form a single linear
-  chain in v1 - see `src/graph_config.c`'s validation).
+  `testdata/example_graph.json` for the basic shape: `input` (the ring
+  to create), `nodes` (stage instances, each a `type` matching a loaded
+  plugin and a `data.config` block), `edges` (`source`/`target` node
+  ids, plus an optional `source_port` for a multi-output stage - must
+  form a tree with exactly one root and no fan-in - see
+  `src/graph_config.c`'s validation, and `testdata/example_branching_graph.json`
+  for a worked multi-port example).
 - `--web-port=N` - `GET /status.json` (records in/dropped/forwarded,
   uptime), `GET /api/stage-types` (Phase 3 web UI's palette data),
   `GET /api/graph` / `POST /api/graph` (load/save the graph file - a
@@ -120,11 +124,11 @@ end" below for what to point at the receiving UDP port):
 Loaded as `.so` plugins at startup (`dlopen()`, scanned from
 `--plugins-dir`) - see `src/plugin_loader.c` for the loading mechanism
 and `src/stage.h`/`src/stage_abi.h` for the interface every stage type
-implements. The four built-ins below are rebuilt as plugins too
+implements. The six built-ins below are rebuilt as plugins too
 (`make plugins` in `src/`, producing `plugins/{validate,extract,
-convert,forward_udp}.so`), loaded through the exact same mechanism a
-third-party plugin uses - no special-casing between "built-in" and
-"external":
+convert,forward_udp,dump_binary,dump_text}.so`), loaded through the
+exact same mechanism a third-party plugin uses - no special-casing
+between "built-in" and "external":
 
 - **`validate`** - confirms `chrono_record_hdr.magic`/`len` are sane.
   Config: `require_magic` (bool, default true).
@@ -133,25 +137,39 @@ third-party plugin uses - no special-casing between "built-in" and
   (2, 4, or 8).
 - **`convert`** - linear raw-to-engineering calibration:
   `engineering = raw * scale + offset`. Config: `scale`, `offset`.
-- **`forward_udp`** - sends the engineering value as an 8-byte UDP
+- **`forward_udp`** - a leaf. Sends a record's bytes verbatim as a UDP
   payload over a plain kernel socket (one per stage instance, created
-  at graph-load time). Config: `dst_ip`, `dst_port` (required),
+  at graph-load time). Accepts `raw_record`/`validated`/`extracted`
+  (opaque byte blobs - shipped as-is, whatever width they happen to
+  be) but deliberately not `engineering` (a double needs an explicit
+  encoding step first - see `dump_text` below, or `forward_udp_stage.c`'s
+  own header comment for why). Config: `dst_ip`, `dst_port` (required),
   `src_ip`, `src_port` (optional - only needed to bind to a specific
   local address/port, e.g. on a multi-homed host; otherwise the kernel
   picks the route and an ephemeral port itself, like any ordinary UDP
   client).
+- **`dump_binary`** - a leaf. Writes every record's bytes verbatim to a
+  file, back to back, no framing added - accepts any byte-blob type
+  (`raw_record`/`validated`/`extracted`/`wire_frame`), a generic
+  "capture whatever's flowing at this point" debugging tool. Config:
+  `path` (required; truncated on open).
+- **`dump_text`** - a leaf, and the built-in consumer of `convert`'s
+  output. Formats each `engineering` value as ASCII text (`%.17g`)
+  followed by a literal carriage return (`\r`, not `\n` - see
+  `dump_text_stage.c`'s own comment), one value per record. Config:
+  `path` (required; truncated on open).
 
 New stage types are built entirely outside this repo: implement
-`struct stage`'s init/process/teardown contract (plus an optional
-`out_port_count(state)` if your stage routes records to more than one
-destination - see `plugin-sdk/README.md`'s "Output ports" and
-`testdata/example_branching_graph.json` for a worked example), export
+`struct stage`'s init/process/teardown contract - a stage can accept
+more than one input type (`in_types` is a bitmask, see
+`plugin-sdk/README.md`'s "Input types") and route to more than one
+output (an optional `out_port_count(state)` - see "Output ports" and
+`testdata/example_branching_graph.json` for a worked example) - export
 the two `stage_abi.h` functions, and build against `plugin-sdk/` (a
 small, frozen ABI - `stage.h`, `stage_abi.h`, `json.h`/`.c` - with zero
 DPDK dependency; see `plugin-sdk/README.md` for the full build rules
 and two worked examples). Drop the resulting `.so` into `--plugins-dir`
-and
-it's picked up on the next startup - no rebuild of loomtabulator
+and it's picked up on the next startup - no rebuild of loomtabulator
 itself, no source-tree changes. `dlopen()` is a real code-execution
 trust boundary; loomtabulator does no sandboxing or vetting of plugins
 beyond an ABI-version check, an accepted tradeoff given it already
@@ -159,30 +177,37 @@ runs in a container.
 
 ## Verifying it end-to-end
 
-No NIC, vdev, or even a second machine needed - `forward_udp` sends
-over a plain kernel UDP socket, so any ordinary UDP listener on the
-same host works. `testdata/example_graph.json` ships pointed at
-`127.0.0.1:12345` by default. Simplest local check:
-```
-nc -ul 12345
-```
+No NIC, vdev, or even a second machine needed. `testdata/example_graph.json`
+(`validate -> extract -> convert -> dump_text`) needs nothing but a
+file to inspect afterward:
 ```
 ./build/loomtabulator -l 0-3 --no-huge --no-pci -- \
   --graph=../testdata/example_graph.json --testgen-count=1000
+cat build/example_output.txt   # or wherever its "path" config points
 ```
-You should see 1000 lines of binary garbage (raw 8-byte big-endian
-doubles) arrive on the `nc` side - if you want a real decode, a couple
-of lines of Python (`struct.unpack('>d', sock.recv(8))`) will do it.
-For cross-host or real-NIC verification instead, point `dst_ip`/
-`dst_port` at another machine and use `dpdk-app-example --receiver`
-there (it already does UDP dst-port filtering and a clean summary) -
-nothing about `loomtabulator` itself requires that, it's just a more
-capable receiver than `nc` if you want packet-loss/ordering stats.
+You should see 1000 calibrated values, one per line-ish (each
+`\r`-terminated, not `\n` - see `dump_text`'s own entry above), each
+the running counter times `0.001`.
+
+For a UDP-forwarding example instead, `forward_udp` sends over a plain
+kernel UDP socket, so any ordinary UDP listener works:
+```
+nc -ul 12345
+```
+Wire a `forward_udp` node into a graph pointed at `127.0.0.1:12345`
+(e.g. swap `example_graph.json`'s `dump_text` node for one, since
+`extract`'s raw byte-blob output is one of `forward_udp`'s accepted
+types directly - no `convert` step needed) and run the same way. For
+cross-host or real-NIC verification instead, point `dst_ip`/`dst_port`
+at another machine and use `dpdk-app-example --receiver` there (it
+already does UDP dst-port filtering and a clean summary) - nothing
+about `loomtabulator` itself requires that, it's just a more capable
+receiver than `nc` if you want packet-loss/ordering stats.
 
 `testdata/example_branching_graph.json` demonstrates real multi-port
 routing (see "Stage types" above) - it needs
 `plugin-sdk/example_router_stage.c` built and dropped into
-`--plugins-dir` first (it's not one of the four built-ins `make
+`--plugins-dir` first (it's not one of the six built-ins `make
 plugins` produces). Point two listeners at `127.0.0.1:12345` and
 `:12346`; running it with `--testgen-count=300` sends 298 records to
 the first and 2 (the records whose counter value's low byte is `42`)

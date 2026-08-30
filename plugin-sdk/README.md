@@ -47,7 +47,8 @@ touched from the handle - a mismatch is a clean rejection, not a
 crash. `loom_stage_entry()` returns a pointer to one `static const
 struct stage` describing your stage type: its name (must match a graph
 node's `"type"` field), declared input/output port types (`stage.h`'s
-`enum stage_port_type`), and four function pointers:
+`enum stage_port_type` - see "Input types" below for why `in_types` is
+a set, not a single value), and four function pointers:
 
 - `init(config)` - called once per graph node using this stage type,
   before any data flows. Receives that node's `data.config` JSON
@@ -59,7 +60,10 @@ node's `"type"` field), declared input/output port types (`stage.h`'s
   means "always 1 port") - the overwhelming majority of stages, single-
   output ones, never need to implement this at all.
 - `process(state, in, out)` - the hot path, called once per record.
-  `in->type` is always your declared `in_type`. `*out` is
+  `in->type` is guaranteed to be one of your declared `in_types` (see
+  "Input types" below) - not always the same fixed value if you accept
+  more than one, so branch on it yourself if the shapes genuinely
+  differ. `*out` is
   zero-initialized before every call - a guarantee loomtabulator's
   pipeline runner commits to, not an incidental default - so any field
   you don't explicitly care about (currently only `flags`) already
@@ -80,6 +84,32 @@ own `teardown()`. Two graph nodes of the same plugin type get two
 independent `init()` calls with two independent state pointers, so
 per-node resources (e.g. `forward_udp`'s own outbound socket) never
 collide between them.
+
+## Input types
+
+`struct stage.in_types` is a bitmask, not a single `enum
+stage_port_type` value - a stage can accept more than one input type.
+Build it from `PORT_TYPE_BIT(...)`:
+
+```c
+.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) | PORT_TYPE_BIT(PORT_TYPE_VALIDATED),
+```
+
+Most stages still only need one bit. Accept more than one when your
+`process()` genuinely treats them the same way - the built-in
+`forward_udp` is the model case: it accepts `raw_record`, `validated`,
+and `extracted` alike, because all three are opaque byte blobs it
+ships onto the wire verbatim, with nothing to reinterpret. It
+deliberately does *not* accept `engineering` - a double is a specific
+host-order numeric value, not an opaque blob, so sending its raw bytes
+without an explicit encoding step would be an unstated, architecture-
+specific format no receiver could safely assume. If your stage accepts
+several types that need genuinely different handling, check `in->type`
+inside `process()` to know which one you actually got.
+
+`graph_config.c` rejects wiring an edge whose upstream `out_type` isn't
+one of your declared `in_types`, with an error naming what it actually
+got and everything you accept.
 
 ## Output ports
 
@@ -110,11 +140,13 @@ before you wire a graph:
   this exactness is the whole point of a per-instance count instead of
   a static ceiling.
 - Returning `0` declares this node a **leaf** - the end of a path
-  through the graph. A leaf must have zero outgoing edges and produce
-  `PORT_TYPE_WIRE_FRAME` (this generalizes the old "the chain's last
-  stage must produce a wire frame" rule to "every leaf must" - see
-  `example_router_stage.c` for a template, and `forward_udp` for the
-  built-in leaf).
+  through the graph. A leaf must have zero outgoing edges; its
+  `out_type` is unused and unconstrained (nothing ever reads a leaf's
+  `*out`), whatever's most descriptive of what it actually does - the
+  three built-in leaves each pick something different: `forward_udp`
+  (transmits) uses `wire_frame`, `dump_binary`/`dump_text` (write to a
+  file) use `raw_record`/`engineering` respectively. There's no
+  required value.
 - All of a node's output ports share that instance's single `out_type`
   - there's no per-port output type.
 

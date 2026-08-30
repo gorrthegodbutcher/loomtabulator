@@ -23,6 +23,14 @@
  * author needs to know, not an internal engine detail. */
 #define STAGE_MAX_OUT_PORTS 16
 
+/* Turns an enum stage_port_type value into its bit for struct
+ * stage.in_types below - a stage accepting several input types ORs
+ * these together (e.g. PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) |
+ * PORT_TYPE_BIT(PORT_TYPE_VALIDATED)). The type space is small (5
+ * values today) so this comfortably fits one unsigned int; matches
+ * this file's own STAGE_RECORD_FLAG_* bit-flag convention. */
+#define PORT_TYPE_BIT(t) (1u << (unsigned)(t))
+
 /* The pipeline processing contract - see the project plan
  * (~/.claude/plans/noble-kindling-lemon.md) for the full design
  * rationale. A "stage" is one step in a linear chain (validate ->
@@ -48,11 +56,13 @@
  * involved. See tests/test_stage_chain.c. */
 
 /* Small, closed set on purpose (not an open/string type system) so
- * connecting two stages is a simple equality check - both here, in
- * graph_config.c's edge validation, and in the web UI's connection
- * rules (Phase 3), which serialize this same enum's names from
- * plugin_loader.c's dynamically-populated table rather than invent
- * its own type system. */
+ * connecting two stages is a simple membership check (is the upstream
+ * out_type one of the downstream stage's declared in_types? - see
+ * struct stage.in_types below) - both here, in graph_config.c's edge
+ * validation, and in the web UI's connection rules (Phase 3), which
+ * serialize this same enum's names from plugin_loader.c's
+ * dynamically-populated table rather than invent its own type
+ * system. */
 enum stage_port_type {
 	PORT_TYPE_RAW_RECORD,   /* struct chrono_record_hdr + payload, exactly
 				  * as read off the input ring - nothing checked
@@ -71,19 +81,14 @@ enum stage_port_type {
 				  * regardless of the raw field's original
 				  * width, so every stage downstream of convert
 				  * has one fixed value shape to deal with. */
-	PORT_TYPE_WIRE_FRAME,   /* a fully-built outbound UDP frame, ready to
-				  * hand to app_build_packet()'s caller for
-				  * transmission - forward_udp's input type,
-				  * and the only type forward_udp ever expects
-				  * to receive (it does the building itself;
-				  * this type exists so a graph can be
-				  * type-checked even though v1 always has
-				  * forward_udp build the frame from
-				  * PORT_TYPE_ENGINEERING - see forward_udp_stage.c's
-				  * own comment on why its declared in_type is
-				  * PORT_TYPE_ENGINEERING, not this one, and
-				  * this type is reserved for a future stage
-				  * that builds a frame explicitly). */
+	PORT_TYPE_WIRE_FRAME,   /* forward_udp's OUTPUT type - a record that's
+				  * already been built and handed off for
+				  * transmission (or, for dump_binary, already
+				  * written to a file) - not something any
+				  * stage declares as an *input* type today.
+				  * Also one of dump_binary_stage.c's several
+				  * accepted input types, for capturing exactly
+				  * what forward_udp would/did transmit. */
 };
 
 /* Carried through every stage in the chain unchanged, alongside whatever
@@ -162,7 +167,23 @@ struct stage_result {
 struct stage {
 	const char *name;         /* matches a graph JSON node's "type" field
 				     * exactly (see graph_config.c) */
-	enum stage_port_type in_type;
+
+	/* Bitmask of PORT_TYPE_BIT(...) values - every input type this
+	 * stage's process() knows how to handle. Most stages accept exactly
+	 * one (a single PORT_TYPE_BIT(x)); a stage like forward_udp that
+	 * treats several types identically (verbatim bytes, regardless of
+	 * which specific byte-blob type they came from) ORs them together.
+	 * graph_config.c rejects wiring an edge whose upstream out_type
+	 * isn't one of these bits. Since in->type on the hot path is then
+	 * only guaranteed to be *one of* these, not always the same fixed
+	 * value, a stage accepting more than one type that need genuinely
+	 * different handling must itself branch on in->type inside
+	 * process() to know which shape it actually received -
+	 * forward_udp_stage.c accepts three types but treats them
+	 * identically (verbatim bytes either way), so it happens not to
+	 * need such a branch; a stage combining shapes that truly differ
+	 * would. */
+	unsigned in_types;
 	enum stage_port_type out_type;
 
 	/* config is this node's "data.config" object straight out of the
@@ -188,10 +209,14 @@ struct stage {
 	 * graph_config.c caches the result and never calls this again on the
 	 * hot path. Returning a value > STAGE_MAX_OUT_PORTS is a startup
 	 * error. Returning 0 declares this node a genuine leaf:
-	 * graph_config.c then requires it to have zero outgoing edges and
-	 * out_type == PORT_TYPE_WIRE_FRAME (generalizing v1's old "the
-	 * chain's last stage must produce a wire frame" rule to "every leaf
-	 * must"). Otherwise, every port in [0, out_port_count()) must have
+	 * graph_config.c then requires it to have zero outgoing edges - its
+	 * out_type is unused in that case (nothing ever reads a leaf's
+	 * *out; pipeline_run() returns as soon as process() succeeds,
+	 * before ever looking at it), so a leaf can declare whatever
+	 * out_type is most descriptive of what it actually does (e.g.
+	 * dump_binary_stage.c dumps to a file, not the wire, but still
+	 * needs to put something in this field). Otherwise, every port in
+	 * [0, out_port_count()) must have
 	 * exactly one outgoing edge in the graph - a stage declaring N ports
 	 * but only wiring some of them is a startup error, not a silently
 	 * unreachable port. Every output port of one node instance shares
@@ -200,10 +225,11 @@ struct stage {
 	unsigned (*out_port_count)(void *state);
 
 	/* The hot-path function, called once per record that reaches this
-	 * stage. in->type is always this stage's declared in_type (the
-	 * pipeline runner guarantees that by construction, from graph
-	 * validation - a stage's process() never needs to check it itself).
-	 * On ok=true, the caller expects *out to be fully populated
+	 * stage. in->type is guaranteed to be one of this stage's declared
+	 * in_types (graph validation guarantees that by construction), but
+	 * NOT always the same fixed value if in_types has more than one bit
+	 * set - see in_types' own comment above. On ok=true, the caller
+	 * expects *out to be fully populated
 	 * (type=this stage's out_type, data/len/capture_tsc set) and passes
 	 * it on to the next stage; on ok=false, *out is ignored.
 	 *
