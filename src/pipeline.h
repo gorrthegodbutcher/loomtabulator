@@ -15,6 +15,16 @@ struct pipeline_stage_instance {
 				      * owned/freed here */
 	void *state;                /* this instance's own init() result */
 
+	/* This node's own "id" string straight out of the graph JSON (see
+	 * graph_config.c) - points into the same long-lived parsed-JSON
+	 * buffer every other string this struct's stage points to already
+	 * relies on staying alive (graph_config.c's own read_whole_file()
+	 * is "intentionally never freed"). Exists purely so web_status.c's
+	 * periodic status collection (struct stage.get_status, stage.h) can
+	 * key its results by the exact same id the web UI's own graph nodes
+	 * use - never read on the hot path. */
+	const char *node_id;
+
 	/* This node's own out_port_count(state) result, resolved once by
 	 * graph_config_load() and cached here - pipeline_run() never calls
 	 * out_port_count() again on the hot path. 0 means this is a leaf -

@@ -205,6 +205,7 @@ struct app_opts {
 	uint32_t testgen_payload_len;
 	uint64_t testgen_barrier_every;
 	unsigned int workers; /* 0 = derive from rte_lcore_count() - 1 */
+	uint32_t status_poll_interval_sec; /* see --status-poll-interval below */
 };
 
 static void
@@ -226,6 +227,12 @@ usage(void)
 		"                      relative to cwd (empty string = load none)\n"
 		"  --workers=N         worker lcores to run the pipeline on, default:\n"
 		"                      (EAL lcore count - 1). Must be <= that.\n"
+		"  --status-poll-interval=N\n"
+		"                      seconds between GET /api/stage-status snapshots\n"
+		"                      (struct stage.get_status() - see plugin-sdk/\n"
+		"                      README.md), default 2. Expected range 1-10 -\n"
+		"                      deliberately not a hot-path concern, not\n"
+		"                      hard-clamped.\n"
 		"\n"
 		"  Synthetic input (stands in for chrontabulator's not-yet-built\n"
 		"  replay feature - see the project plan's Phase 4) - off by default,\n"
@@ -256,6 +263,7 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 		{"testgen-count", required_argument, 0, 'c'},
 		{"testgen-payload", required_argument, 0, 'p'},
 		{"testgen-barrier-every", required_argument, 0, 'b'},
+		{"status-poll-interval", required_argument, 0, 'S'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -265,10 +273,11 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 	opts->web_root = "../web/dist";
 	opts->plugins_dir = "../plugins";
 	opts->testgen_payload_len = 16;
+	opts->status_poll_interval_sec = 2;
 
 	optind = 1;
 	int opt;
-	while ((opt = getopt_long(argc, argv, "g:W:R:P:N:er:c:p:b:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "g:W:R:P:N:er:c:p:b:S:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'g': opts->graph_path = optarg; break;
 		case 'W': opts->web_port = (uint16_t)strtoul(optarg, NULL, 10); break;
@@ -280,6 +289,7 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 		case 'c': opts->testgen_count = strtoull(optarg, NULL, 10); break;
 		case 'p': opts->testgen_payload_len = (uint32_t)strtoul(optarg, NULL, 10); break;
 		case 'b': opts->testgen_barrier_every = strtoull(optarg, NULL, 10); break;
+		case 'S': opts->status_poll_interval_sec = (uint32_t)strtoul(optarg, NULL, 10); break;
 		case 'h': usage(); exit(0);
 		default: usage(); return -1;
 		}
@@ -292,6 +302,10 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 	}
 	if (opts->testgen_payload_len < 8) {
 		fprintf(stderr, "--testgen-payload must be at least 8\n");
+		return -1;
+	}
+	if (opts->status_poll_interval_sec == 0) {
+		fprintf(stderr, "--status-poll-interval must be at least 1\n");
 		return -1;
 	}
 	return 0;
@@ -414,6 +428,13 @@ main(int argc, char **argv)
 	printf("Running - Ctrl+C to stop.\n");
 	uint64_t last_status_update = rte_rdtsc();
 	uint64_t status_interval_tsc = rte_get_tsc_hz() * STATUS_UPDATE_INTERVAL_US / 1000000;
+	/* Independently timed from status_interval_tsc above (500ms,
+	 * fixed) - --status-poll-interval defaults to 2s and is explicitly
+	 * meant to be slow (struct stage.get_status() is not a hot-path
+	 * concern - see stage.h's own comment), so this deliberately isn't
+	 * folded into the same check. */
+	uint64_t last_stage_status_update = rte_rdtsc();
+	uint64_t stage_status_interval_tsc = rte_get_tsc_hz() * (uint64_t)opts.status_poll_interval_sec;
 
 	while (!g_shutdown_requested) {
 		rte_delay_us(200);
@@ -425,6 +446,10 @@ main(int argc, char **argv)
 					       atomic_load(&counters.records_dropped),
 					       atomic_load(&counters.records_forwarded));
 			last_status_update = now;
+		}
+		if (now - last_stage_status_update >= stage_status_interval_tsc) {
+			app_web_status_update_stage_statuses(&status, &chain);
+			last_stage_status_update = now;
 		}
 	}
 

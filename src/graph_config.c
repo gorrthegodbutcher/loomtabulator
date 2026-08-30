@@ -328,6 +328,7 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 
 		chain->stages[idx].stage = stage;
 		chain->stages[idx].state = state;
+		chain->stages[idx].node_id = n->id;
 		chain->stages[idx].port_count = port_count;
 		for (unsigned k = 0; k < STAGE_MAX_OUT_PORTS; k++)
 			chain->stages[idx].children[k] = -1;

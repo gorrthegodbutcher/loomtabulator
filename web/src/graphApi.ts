@@ -52,6 +52,15 @@ export interface StageNodeData extends Record<string, unknown> {
                           // App.tsx's right-click context menu; inert
                           // for the synthetic ring-input node (it never
                           // flags anything).
+  liveStatus: StageStatusEntry | null; // ephemeral, computed at render
+                          // time by App.tsx from its periodic
+                          // fetchStageStatuses() poll (see below) -
+                          // NEVER part of what saveGraph() sends
+                          // (it only ever picks config/label/onInvalid
+                          // into the POST body, so this needs no extra
+                          // exclusion logic). null until the first poll
+                          // resolves, or if this node has no status to
+                          // report at all.
 }
 
 export interface GraphMeta {
@@ -59,6 +68,20 @@ export interface GraphMeta {
   name: string;
   input: Record<string, unknown>; // ring_name/ring_size/record_type - not editable
                                     // in this UI yet, just round-tripped as-is.
+}
+
+// GET /api/stage-status (src/web_status.c's handle_stage_status(), ABI
+// v6's struct stage.get_status()) - one entry per graph node, "fields"
+// empty when that stage either has no get_status() or currently has
+// nothing to report (both normal, not an error).
+export interface StageStatusField {
+  name: string;
+  value: number;
+}
+export interface StageStatusEntry {
+  node_id: string;
+  type: string;
+  fields: StageStatusField[];
 }
 
 interface RawGraphNode {
@@ -189,6 +212,8 @@ export function makeRingInputNode(x: number, y: number): Node<StageNodeData> {
       targetConnectedColor: null,
       onInvalid: "drop", // inert placeholder - this synthetic node never
                           // flags anything, but StageNodeData requires it
+      liveStatus: null, // inert placeholder - not a real stage, never
+                          // appears in GET /api/stage-status
     },
   };
 }
@@ -249,6 +274,7 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
         outPortCount: portCounts[i],
         targetConnectedColor: null, // filled in by App.tsx's useMemo
         onInvalid: n.data?.on_invalid === "pass" ? "pass" : "drop",
+        liveStatus: null, // filled in by App.tsx's poll, same as targetConnectedColor
       },
     };
   });
@@ -388,4 +414,22 @@ export async function waitForReload(timeoutMs = 15000, intervalMs = 300): Promis
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   return false;
+}
+
+/* GET /api/stage-status (src/web_status.c's handle_stage_status()) -
+ * every node's current struct stage.get_status() snapshot, keyed by
+ * node_id for O(1) lookup against the graph's own node ids. Called on
+ * an interval by App.tsx (see its own useEffect) - deliberately slow
+ * (--status-poll-interval, default 2s server-side), so a transient
+ * failure here just means "try again next tick," not something worth
+ * surfacing as an error in the UI. */
+export async function fetchStageStatuses(): Promise<Record<string, StageStatusEntry>> {
+  try {
+    const res = await fetch("/api/stage-status", { cache: "no-store" });
+    if (!res.ok) return {};
+    const entries: StageStatusEntry[] = await res.json();
+    return Object.fromEntries(entries.map((e) => [e.node_id, e]));
+  } catch {
+    return {};
+  }
 }

@@ -53,6 +53,12 @@ main(void)
 	assert(strcmp(pl.stages[1].stage->name, "extract") == 0);
 	assert(strcmp(pl.stages[2].stage->name, "convert") == 0);
 	assert(strcmp(pl.stages[3].stage->name, "dump_text") == 0);
+	/* node_id (used by GET /api/stage-status - see pipeline.h) matches
+	 * the graph JSON's own "id" strings exactly. */
+	assert(strcmp(pl.stages[0].node_id, "n1") == 0);
+	assert(strcmp(pl.stages[1].node_id, "n2") == 0);
+	assert(strcmp(pl.stages[2].node_id, "n3") == 0);
+	assert(strcmp(pl.stages[3].node_id, "n4") == 0);
 	for (size_t i = 0; i < pl.stage_count; i++)
 		if (pl.stages[i].stage != NULL && pl.stages[i].stage->teardown != NULL)
 			pl.stages[i].stage->teardown(pl.stages[i].state);

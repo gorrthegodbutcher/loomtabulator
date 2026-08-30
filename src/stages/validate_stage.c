@@ -1,5 +1,7 @@
 #include <string.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include "validate_stage.h"
 #include "../record.h"
 
@@ -27,6 +29,17 @@
 
 struct validate_config {
 	bool require_magic;
+
+	/* Exposed via get_status() below - see stage.h's own comment on why
+	 * these need to be atomics: process() can be called concurrently by
+	 * every worker lcore that routes a record to THIS instance, while
+	 * get_status() reads them from the main lcore on a completely
+	 * separate, much slower cadence. "checked" only counts records that
+	 * got far enough to actually have their magic examined (the two
+	 * structural hard-drops below never reach this point) - "flagged"
+	 * is the subset of those with a bad magic. */
+	atomic_uint_least64_t checked;
+	atomic_uint_least64_t flagged;
 };
 
 void *
@@ -41,6 +54,8 @@ validate_stage_init(const struct json_value *config)
 	 * the config knob exists mainly for test fixtures that want to
 	 * exercise downstream stages without building a real header. */
 	st->require_magic = json_as_bool(json_object_get(config, "require_magic"), true);
+	atomic_init(&st->checked, 0);
+	atomic_init(&st->flagged, 0);
 	return st;
 }
 
@@ -58,6 +73,9 @@ validate_stage_process(void *state, const struct stage_record *in, struct stage_
 		return (struct stage_result){ .ok = false, .drop_reason = "hdr->len doesn't match record size" };
 
 	bool magic_bad = cfg->require_magic && hdr->magic != CHRONO_RECORD_MAGIC;
+	atomic_fetch_add_explicit(&cfg->checked, 1, memory_order_relaxed);
+	if (magic_bad)
+		atomic_fetch_add_explicit(&cfg->flagged, 1, memory_order_relaxed);
 
 	/* Always a full copy (not aliasing in->data), same "every stage owns
 	 * its own scratch buffer" simplicity as every other v1 stage - see
@@ -76,4 +94,15 @@ void
 validate_stage_teardown(void *state)
 {
 	free(state);
+}
+
+void
+validate_stage_get_status(void *state, struct stage_status *out)
+{
+	struct validate_config *cfg = state;
+	out->field_count = 2;
+	snprintf(out->fields[0].name, STAGE_STATUS_NAME_MAX, "records_checked");
+	out->fields[0].value = atomic_load_explicit(&cfg->checked, memory_order_relaxed);
+	snprintf(out->fields[1].name, STAGE_STATUS_NAME_MAX, "records_flagged");
+	out->fields[1].value = atomic_load_explicit(&cfg->flagged, memory_order_relaxed);
 }
