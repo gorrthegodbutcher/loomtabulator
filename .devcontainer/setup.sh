@@ -22,8 +22,10 @@ echo "==> Building loomtabulator..."
 cd "$WORKSPACE_DIR/src"
 bear -- make
 
-echo "==> Running unit tests (stage chain + graph config)..."
+echo "==> Running unit tests (four tiers - see CLAUDE.md's Testing section)..."
 make test
 
-# Phase 3 adds a step here: cd ../web && npm ci && npm run build - see
-# the Dockerfile's own comment on why that's not part of v1.
+echo "==> Building web UI (Phase 3)..."
+cd "$WORKSPACE_DIR/web"
+npm ci
+npm run build

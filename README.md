@@ -2,8 +2,12 @@
 
 A pluggable data-processing pipeline, developed inside a VS Code Dev
 Container built on top of the `spdk-dpdk-ubuntu` image. Plain DPDK, no
-SPDK - like `dpdk-app-example`, it reads from a ring and writes UDP, no
-block device involved.
+SPDK - it reads from a `rte_ring` and writes UDP over a plain kernel
+socket, no block device and no dedicated NIC/DPDK-vdev involved. This
+means no physical or virtual hardware port is required to build, run,
+or test it - the only real hardware consideration is CPU core
+isolation for the worker lcores (see `--workers=N` below), a host-level
+setup step independent of anything in this repo.
 
 **The goal**: consume chrontabulator's eventual sorted-replay output
 (records read back off NVMe, sorted by capture time) through a chain of
@@ -33,7 +37,7 @@ epoch's records finish before the next epoch's are considered started
 
 ```
                               +-> [worker 1: validate -> extract -> convert -> forward_udp] -+
-[testgen thread] --rte_ring-> +-> [worker 2: ...........................................] -+--> NIC
+[testgen thread] --rte_ring-> +-> [worker 2: ...........................................] -+--> UDP (kernel socket)
                               +-> [worker N: ...........................................] -+
 ```
 
@@ -44,7 +48,9 @@ epoch's records finish before the next epoch's are considered started
    cd ../spdk-dpdk-ubuntu
    docker build -f Dockerfile-single -t spdk-dpdk-ubuntu:26.05-local .
    ```
-2. Allocate hugepages on the host:
+2. Allocate hugepages on the host - only needed if running without
+   `--no-huge` (see "Usage" below; no NIC/vdev is ever required, with
+   or without hugepages):
    ```
    echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
    ```
@@ -55,7 +61,11 @@ epoch's records finish before the next epoch's are considered started
 Open this folder in VS Code, "Dev Containers: Reopen in Container".
 First launch builds standalone DPDK (a few minutes) and runs the test
 suite; subsequent launches skip the DPDK build since it's already
-configured.
+configured. `make` (in `src/`) builds both the `loomtabulator` binary
+and the built-in stage plugins (`make shared` + `make plugins`,
+producing `plugins/*.so`); `loomtabulator` won't have any stage types
+available unless `plugins/` exists and is populated, or
+`--plugins-dir` points somewhere that is.
 
 ## Usage
 
@@ -69,9 +79,19 @@ configured.
   stage and a `data.config` block), `edges` (must form a single linear
   chain in v1 - see `src/graph_config.c`'s validation).
 - `--web-port=N` - `GET /status.json` (records in/dropped/forwarded,
-  uptime). Default 8080, `0` disables it.
-- `--mtu=BYTES` / `--force-10g` - same meaning as `dpdk-app-example`'s
-  equivalent flags.
+  uptime), `GET /api/stage-types` (Phase 3 web UI's palette data),
+  `GET /api/graph` / `POST /api/graph` (load/save the graph file - a
+  save validates but does not affect the running pipeline; restart to
+  apply it), and static files from `--web-root`. Default 8080, `0`
+  disables it.
+- `--web-root=PATH` - directory holding the built Phase 3 web UI
+  (`web/dist/`) to serve as static files. Default `../web/dist`
+  (matches running `./build/loomtabulator` from within `src/`); empty
+  string disables static-file serving.
+- `--plugins-dir=PATH` - directory scanned for stage-type `.so` plugins
+  at startup (see "Stage types" below). Default `../plugins` (matches
+  running `./build/loomtabulator` from within `src/`); a missing or
+  empty directory loads zero plugins, not an error.
 - `--workers=N` - worker lcores to run the pipeline on. Default: EAL
   lcore count minus 1 (the main lcore is orchestration-only - status
   ticks and shutdown, never blocked inside a barrier drain). Must be
@@ -86,16 +106,23 @@ configured.
   epoch/watermark barrier - watch stderr for "drained barrier" lines to
   confirm epochs are advancing at a sane cadence.
 
-Example, against a real NIC bound to `vfio-pci`:
+Example - no NIC/vdev needed, runs anywhere (see "Verifying it end to
+end" below for what to point at the receiving UDP port):
 ```
-./build/loomtabulator -l 0-1 --no-shconf -a <pci-addr> -- \
+./build/loomtabulator -l 0-3 --no-huge --no-pci -- \
   --graph=../testdata/example_graph.json --testgen-rate=1000
 ```
 
 ## Stage types (v1)
 
-Compiled-in, see `src/stage_registry.c` for the full table and
-`src/stage.h` for the interface every stage type implements:
+Loaded as `.so` plugins at startup (`dlopen()`, scanned from
+`--plugins-dir`) - see `src/plugin_loader.c` for the loading mechanism
+and `src/stage.h`/`src/stage_abi.h` for the interface every stage type
+implements. The four built-ins below are rebuilt as plugins too
+(`make plugins` in `src/`, producing `plugins/{validate,extract,
+convert,forward_udp}.so`), loaded through the exact same mechanism a
+third-party plugin uses - no special-casing between "built-in" and
+"external":
 
 - **`validate`** - confirms `chrono_record_hdr.magic`/`len` are sane.
   Config: `require_magic` (bool, default true).
@@ -104,47 +131,63 @@ Compiled-in, see `src/stage_registry.c` for the full table and
   (2, 4, or 8).
 - **`convert`** - linear raw-to-engineering calibration:
   `engineering = raw * scale + offset`. Config: `scale`, `offset`.
-- **`forward_udp`** - builds and transmits a UDP frame carrying the
-  engineering value. Config: `dst_mac`, `src_ip`, `dst_ip`, `src_port`,
-  `dst_port`, `hw_checksum` (bool, default true - same meaning as
-  `dpdk-app-example`'s hardware checksum offload).
+- **`forward_udp`** - sends the engineering value as an 8-byte UDP
+  payload over a plain kernel socket (one per stage instance, created
+  at graph-load time). Config: `dst_ip`, `dst_port` (required),
+  `src_ip`, `src_port` (optional - only needed to bind to a specific
+  local address/port, e.g. on a multi-homed host; otherwise the kernel
+  picks the route and an ephemeral port itself, like any ordinary UDP
+  client).
 
-New stage types are added by implementing `struct stage`'s
-init/process/teardown contract (see any file in `src/stages/`) and
-registering it in `src/stage_registry.c` - no dynamic plugin loading
-(`.so`, `dlopen`), matching how `chrontabulator` statically links its
-one NIC driver rather than loading it at runtime.
+New stage types are built entirely outside this repo: implement
+`struct stage`'s init/process/teardown contract, export the two
+`stage_abi.h` functions, and build against `plugin-sdk/` (a small,
+frozen ABI - `stage.h`, `stage_abi.h`, `json.h`/`.c` - with zero DPDK
+dependency; see `plugin-sdk/README.md` for the full build rules and a
+worked example). Drop the resulting `.so` into `--plugins-dir` and
+it's picked up on the next startup - no rebuild of loomtabulator
+itself, no source-tree changes. `dlopen()` is a real code-execution
+trust boundary; loomtabulator does no sandboxing or vetting of plugins
+beyond an ABI-version check, an accepted tradeoff given it already
+runs in a container.
 
 ## Verifying it end-to-end
 
-With `dpdk-app-example --receiver` on another port/host as the
-consumer (it already does UDP dst-port filtering and a clean summary):
+No NIC, vdev, or even a second machine needed - `forward_udp` sends
+over a plain kernel UDP socket, so any ordinary UDP listener on the
+same host works. `testdata/example_graph.json` ships pointed at
+`127.0.0.1:12345` by default. Simplest local check:
 ```
-./build/loomtabulator -l 0-1 -a <pci-addr> -- \
+nc -ul 12345
+```
+```
+./build/loomtabulator -l 0-3 --no-huge --no-pci -- \
   --graph=../testdata/example_graph.json --testgen-count=1000
 ```
-```
-./dpdk-app-example -l 0-1 -a <other-pci-addr> -- \
-  --receiver --port=12345
-```
+You should see 1000 lines of binary garbage (raw 8-byte big-endian
+doubles) arrive on the `nc` side - if you want a real decode, a couple
+of lines of Python (`struct.unpack('>d', sock.recv(8))`) will do it.
+For cross-host or real-NIC verification instead, point `dst_ip`/
+`dst_port` at another machine and use `dpdk-app-example --receiver`
+there (it already does UDP dst-port filtering and a clean summary) -
+nothing about `loomtabulator` itself requires that, it's just a more
+capable receiver than `nc` if you want packet-loss/ordering stats.
 
 ## Roadmap
 
 Working now: the stage-chain mechanism, JSON graph loading/validation,
-a synthetic input generator, real UDP forwarding with optional hardware
-checksum offload, and (Phase 2) a multi-core worker pool with
-epoch/watermark barriers for ordering across cores. Planned: a React
-Flow web UI for visually building pipelines, served airgapped from a
-Vite-built static bundle baked into the image (Phase 3 - see
-`CLAUDE.md`'s "Phase 3 design sketch" for the concrete plan: schema,
-new `GET /api/stage-types` + save endpoints, dev container/Node
-changes, the airgap build contract); real integration with
-chrontabulator's replay feature via a DPDK multi-process shared ring,
-once that feature exists (Phase 4).
-
-One known, documented gap from Phase 2 worth flagging here too:
-`src/stages/forward_udp_stage.c` still transmits on a single hardcoded
-TX queue with no locking, so it's not safe for a multi-worker graph
-that ends in it as-is - see `CLAUDE.md`'s "What's NOT built yet" for
-the full note. The real output/forward mechanism (DPDK TX vs. a kernel
-socket vs. writing timestamped files) is still an open decision.
+a synthetic input generator, real UDP forwarding over a plain kernel
+socket (no NIC/DPDK-vdev needed - see "Verifying it end-to-end" above),
+(Phase 2) a multi-core worker pool with epoch/watermark barriers for
+ordering across cores, and (Phase 3, scaffolded) a React Flow web UI -
+a real Vite+React+`@xyflow/react` canvas served airgapped as static
+files from `web/dist/`, that loads the current graph
+(`GET /api/graph`), lets you edit it, and saves it back
+(`POST /api/graph`, validated the same way `--graph=PATH` is at
+startup). Saving does not affect the already-running pipeline - a
+restart picks up the saved file. See `CLAUDE.md`'s "Phase 3 design
+sketch" for why a live hot-swap was tried and deliberately reverted
+(it surfaced a real, pre-existing concurrency bug in the Phase 2
+worker pool that's still open, independent of the web UI). Also
+planned: real integration with chrontabulator's replay feature via a
+DPDK multi-process shared ring, once that feature exists (Phase 4).

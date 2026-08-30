@@ -7,8 +7,6 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <rte_eal.h>
-#include <rte_ethdev.h>
-#include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <rte_cycles.h>
 #include <rte_errno.h>
@@ -16,19 +14,15 @@
 #include <rte_launch.h>
 
 #include "record.h"
-#include "port_init.h"
 #include "ring_input.h"
 #include "graph_config.h"
 #include "pipeline.h"
 #include "pipeline_worker.h"
 #include "epoch_barrier.h"
+#include "plugin_loader.h"
 #include "testgen.h"
 #include "web_status.h"
-#include "stages/forward_udp_stage.h"
 
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 512
-#define MBUF_DATA_SIZE 9216
 #define STATUS_UPDATE_INTERVAL_US 500000
 
 static volatile bool g_shutdown_requested;
@@ -40,11 +34,45 @@ signal_handler(int signum)
 		g_shutdown_requested = true;
 }
 
+/* Reads path's raw bytes into a malloc'd, NUL-terminated buffer - just
+ * for seeding web_graph_ctx.current_graph_json with the startup graph's
+ * own text (see web_status.h), so GET /api/graph has something to serve
+ * before any POST ever happens. graph_config_load() has already proven
+ * path opens and parses cleanly by the time this is called, so failure
+ * here is unexpected enough to just warn and leave current_graph_json
+ * NULL (GET /api/graph then reports 501) rather than aborting the whole
+ * run over a display-only feature. */
+static char *
+read_file_contents(const char *path, size_t *out_len)
+{
+	FILE *f = fopen(path, "rb");
+	if (f == NULL)
+		return NULL;
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (size < 0) {
+		fclose(f);
+		return NULL;
+	}
+	char *buf = malloc((size_t)size + 1);
+	if (buf == NULL) {
+		fclose(f);
+		return NULL;
+	}
+	size_t n = fread(buf, 1, (size_t)size, f);
+	fclose(f);
+	buf[n] = '\0';
+	if (out_len != NULL)
+		*out_len = n;
+	return buf;
+}
+
 struct app_opts {
 	const char *graph_path;
 	uint16_t web_port;
-	uint16_t mtu;
-	bool force_10g;
+	const char *web_root;
+	const char *plugins_dir;
 	uint32_t testgen_rate;
 	uint64_t testgen_count;
 	uint32_t testgen_payload_len;
@@ -62,8 +90,13 @@ usage(void)
 		"  --graph=PATH        JSON pipeline graph to load (required) - see\n"
 		"                      testdata/example_graph.json for the v1 shape.\n"
 		"  --web-port=N        status.json port, default 8080 (0 = off)\n"
-		"  --mtu=BYTES         port MTU (default: device default, 1500)\n"
-		"  --force-10g         restrict advertised link speed to 10G only\n"
+		"  --web-root=PATH     directory holding the built web/dist/ (Phase 3\n"
+		"                      UI) to serve as static files, default\n"
+		"                      ../web/dist relative to cwd (empty string = off)\n"
+		"  --plugins-dir=PATH  directory to scan for stage plugin *.so files\n"
+		"                      (built-in stages are plugins too - see\n"
+		"                      plugin-sdk/README.md), default ../plugins\n"
+		"                      relative to cwd (empty string = load none)\n"
 		"  --workers=N         worker lcores to run the pipeline on, default:\n"
 		"                      (EAL lcore count - 1). Must be <= that.\n"
 		"\n"
@@ -84,8 +117,8 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 	static const struct option long_options[] = {
 		{"graph", required_argument, 0, 'g'},
 		{"web-port", required_argument, 0, 'W'},
-		{"mtu", required_argument, 0, 'u'},
-		{"force-10g", no_argument, 0, 'F'},
+		{"web-root", required_argument, 0, 'R'},
+		{"plugins-dir", required_argument, 0, 'P'},
 		{"workers", required_argument, 0, 'N'},
 		{"testgen-rate", required_argument, 0, 'r'},
 		{"testgen-count", required_argument, 0, 'c'},
@@ -97,16 +130,18 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 
 	memset(opts, 0, sizeof(*opts));
 	opts->web_port = 8080;
+	opts->web_root = "../web/dist";
+	opts->plugins_dir = "../plugins";
 	opts->testgen_payload_len = 16;
 
 	optind = 1;
 	int opt;
-	while ((opt = getopt_long(argc, argv, "g:W:u:FN:r:c:p:b:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "g:W:R:P:N:r:c:p:b:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'g': opts->graph_path = optarg; break;
 		case 'W': opts->web_port = (uint16_t)strtoul(optarg, NULL, 10); break;
-		case 'u': opts->mtu = (uint16_t)strtoul(optarg, NULL, 10); break;
-		case 'F': opts->force_10g = true; break;
+		case 'R': opts->web_root = optarg; break;
+		case 'P': opts->plugins_dir = optarg; break;
 		case 'N': opts->workers = (unsigned int)strtoul(optarg, NULL, 10); break;
 		case 'r': opts->testgen_rate = (uint32_t)strtoul(optarg, NULL, 10); break;
 		case 'c': opts->testgen_count = strtoull(optarg, NULL, 10); break;
@@ -152,27 +187,14 @@ main(int argc, char **argv)
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
 
-	if (rte_eth_dev_count_avail() == 0)
-		rte_exit(EXIT_FAILURE, "no DPDK-bound NIC ports found\n");
-	uint16_t port = 0;
-
-	struct rte_mempool *mbuf_pool = rte_pktmbuf_pool_create(
-		"LOOM_MBUF_POOL", NUM_MBUFS, MBUF_CACHE_SIZE, 0, MBUF_DATA_SIZE, rte_socket_id());
-	if (mbuf_pool == NULL)
-		rte_exit(EXIT_FAILURE, "cannot create mbuf pool: %s\n", rte_strerror(rte_errno));
-
-	struct port_init_result pir;
-	if (app_port_init(port, mbuf_pool, opts.mtu, false, opts.force_10g, &pir) != 0)
-		rte_exit(EXIT_FAILURE, "failed to initialize port %u\n", port);
-	printf("Port %u ready: link %s, %u Mbps, MTU %u, HW checksum offload %s\n",
-	       port, pir.link_up ? "UP" : "DOWN", pir.link_speed_mbps, pir.actual_mtu,
-	       pir.tx_checksum_capable ? "available" : "not supported by this NIC");
-
-	forward_udp_stage_set_runtime(mbuf_pool, port, pir.mac_addr.addr_bytes);
+	char errbuf[256];
+	if (!plugin_loader_load(opts.plugins_dir, errbuf, sizeof(errbuf)))
+		rte_exit(EXIT_FAILURE, "failed to load plugins from '%s': %s\n",
+			  opts.plugins_dir, errbuf);
+	printf("Loaded %zu stage plugin(s) from '%s'\n", stage_registry_count(), opts.plugins_dir);
 
 	struct pipeline_chain chain;
 	struct graph_config_result graph_info;
-	char errbuf[256];
 	if (!graph_config_load(opts.graph_path, &chain, &graph_info, errbuf, sizeof(errbuf)))
 		rte_exit(EXIT_FAILURE, "failed to load graph '%s': %s\n", opts.graph_path, errbuf);
 	printf("Loaded graph '%s': %zu stage(s), input ring '%s' (size %u)\n",
@@ -192,7 +214,15 @@ main(int argc, char **argv)
 
 	struct app_web_status status;
 	app_web_status_init(&status);
-	if (opts.web_port != 0 && web_status_start(opts.web_port, &status, &g_shutdown_requested) == 0)
+
+	struct web_graph_ctx graph_ctx = { .graph_path = opts.graph_path };
+	graph_ctx.current_graph_json = read_file_contents(opts.graph_path, &graph_ctx.current_graph_len);
+	if (graph_ctx.current_graph_json == NULL)
+		fprintf(stderr, "loomtabulator: warning: couldn't re-read '%s' for GET /api/graph "
+				 "(status.json and the running pipeline are unaffected)\n", opts.graph_path);
+
+	if (opts.web_port != 0 &&
+	    web_status_start(opts.web_port, &status, &g_shutdown_requested, opts.web_root, &graph_ctx) == 0)
 		printf("Status server listening on port %u\n", opts.web_port);
 
 	struct testgen_config tg_cfg = {
@@ -260,19 +290,24 @@ main(int argc, char **argv)
 
 	web_status_stop();
 	app_web_status_destroy(&status);
+	free(graph_ctx.current_graph_json);
 
 	for (size_t i = 0; i < chain.stage_count; i++)
 		if (chain.stages[i].stage->teardown != NULL)
 			chain.stages[i].stage->teardown(chain.stages[i].state);
+
+	/* Only safe here, after every stage's own teardown() above AND
+	 * after rte_eal_mp_wait_lcore()/pthread_join(testgen_thread) above
+	 * have already returned - no thread can still be mid-call into a
+	 * plugin's code at this point, so dlclose()-ing every handle can't
+	 * unmap code out from under a live caller. See plugin_loader.h. */
+	plugin_loader_shutdown();
 
 	printf("Final counts: in=%" PRIu64 " dropped=%" PRIu64 " forwarded=%" PRIu64 "\n",
 	       (uint64_t)atomic_load(&counters.records_in),
 	       (uint64_t)atomic_load(&counters.records_dropped),
 	       (uint64_t)atomic_load(&counters.records_forwarded));
 
-	rte_eth_dev_stop(port);
-	rte_eth_dev_close(port);
-	rte_delay_us(3000000);
 	rte_eal_cleanup();
 	return 0;
 }

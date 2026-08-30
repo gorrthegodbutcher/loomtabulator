@@ -1,0 +1,195 @@
+/* Palette/typography lifted from dpdk-app-example's own status console
+ * (http://<host>:8090/ - "Link Console") to match its look and feel, per
+ * explicit request - same hex/rgba values, light and dark. That page
+ * loads IBM Plex Sans/Mono from Google Fonts; this project's Phase 3 UI
+ * already has a zero-external-dependency requirement (see CLAUDE.md's
+ * Phase 3 design sketch's airgap section), so system font stacks stand
+ * in for the two IBM Plex roles instead - a UI sans stack and a
+ * monospace stack for numeric/technical values, same distinction the
+ * reference makes, just without the network fetch. */
+:root {
+  color-scheme: light;
+  --bg:          #f6f8f7;
+  --surface:     #ffffff;
+  --surface-2:   #eef2f1;
+  --border:      rgba(10, 20, 18, 0.10);
+  --text:        #0d1512;
+  --text-2:      #4c5754;
+  --text-mute:   #838d8a;
+  --accent:      #0e8f86;
+  --accent-soft: rgba(14, 143, 134, 0.12);
+  --track:       #dfe6e4;
+  --good:        #0ca30c;
+  --critical:    #d03b3b;
+
+  --font-ui:   system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:          #0a0f0e;
+    --surface:     #121917;
+    --surface-2:   #16201d;
+    --border:      rgba(255, 255, 255, 0.09);
+    --text:        #e8ece9;
+    --text-2:      #a9b5b1;
+    --text-mute:   #6f7a76;
+    --accent:      #2fd0c4;
+    --accent-soft: rgba(47, 208, 196, 0.14);
+    --track:       #22302c;
+    --good:        #1ec91e;
+    --critical:    #e66767;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:          #0a0f0e;
+  --surface:     #121917;
+  --surface-2:   #16201d;
+  --border:      rgba(255, 255, 255, 0.09);
+  --text:        #e8ece9;
+  --text-2:      #a9b5b1;
+  --text-mute:   #6f7a76;
+  --accent:      #2fd0c4;
+  --accent-soft: rgba(47, 208, 196, 0.14);
+  --track:       #22302c;
+  --good:        #1ec91e;
+  --critical:    #e66767;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+/* React Flow's built-in overlay widgets default to plain white, which
+ * clashes hard against a dark canvas - rethemed to the same tokens as
+ * everything else rather than left as the library default. */
+.react-flow__controls {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: none;
+}
+.react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.react-flow__controls-button:hover {
+  background: var(--surface-2);
+}
+.react-flow__controls-button svg {
+  fill: var(--text-2);
+}
+.react-flow__minimap {
+  background: var(--surface) !important;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.react-flow__attribution {
+  background: transparent;
+  color: var(--text-mute);
+}
+
+/* App.tsx's sidebar controls - same button/tile shapes as
+ * dpdk-app-example's own console (its .btn / .tile classes). Kept here
+ * (not inline) since :hover/:disabled states aren't expressible as
+ * plain React inline style objects. */
+.card-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  margin: 0 0 14px;
+}
+
+.btn {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  padding: 10px 20px;
+  cursor: pointer;
+  width: 100%;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.palette-btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.palette-btn:hover {
+  background: var(--surface);
+  border-color: var(--accent);
+}
+
+/* Right-click node menu (App.tsx) - Rename/Delete. */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  padding: 4px;
+  min-width: 140px;
+}
+.context-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.context-menu-item:hover {
+  background: var(--surface-2);
+}
+.context-menu-item:disabled {
+  color: var(--text-mute);
+  cursor: default;
+}
+.context-menu-item:disabled:hover {
+  background: none;
+}
+.context-menu-item.danger {
+  color: var(--critical);
+}

@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     bear \
     clang-tools \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # This project links against the standalone DPDK build (/usr/local/lib/...)
@@ -21,11 +22,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # not-guaranteed-same-ABI copy of every librte_*.so).
 ENV LD_LIBRARY_PATH="/workspace/spdk/isa-l-install/lib:/usr/local/lib/x86_64-linux-gnu"
 
-# Node/npm are Phase 3 (React Flow web UI) build-time-only tooling - not
-# needed for v1, added here when that phase starts. When it does: install
-# via NodeSource's setup script (verify Ubuntu 24.04's own nodejs/npm
-# version is new enough for Vite/@xyflow/react first), network access at
-# build time only, same airgap contract apt/git/pip already rely on. The
-# built web/dist/ gets baked into the image; npm/Node are never a runtime
-# dependency of the deployed container - see the project plan's Phase 3
-# notes for the full design.
+# Node/npm: Phase 3 (React Flow web UI) build-time-only tooling. Via
+# NodeSource's setup script rather than Ubuntu 24.04's own bundled
+# nodejs/npm - guarantees the same Node 20 LTS line the web/ project was
+# developed and its package-lock.json generated against, rather than
+# whatever version happens to be in Ubuntu's archive at build time.
+# Network access at build time only, same airgap contract apt/git/pip
+# already rely on - the built web/dist/ gets baked into the image, and
+# npm/Node are never a runtime dependency of the deployed container (see
+# CLAUDE.md's Phase 3 design sketch).
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*

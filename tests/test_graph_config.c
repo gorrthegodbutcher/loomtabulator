@@ -88,6 +88,17 @@ main(void)
 	assert(!graph_config_load(write_temp_json(branching), &pl, &info, errbuf, sizeof(errbuf)));
 	printf("PASS: rejects a branching (non-chain) graph (%s)\n", errbuf);
 
+	/* Multi-output stage (max_out_ports > 1) - graph_config.c's engine
+	 * only executes single-output chains today, so this must be
+	 * rejected at load time rather than silently misrouted at runtime */
+	const char *multi_out =
+		"{\"input\":{\"ring_name\":\"R\"},"
+		"\"nodes\":[{\"id\":\"n1\",\"type\":\"multi_out_stub\",\"data\":{\"config\":{}}}],"
+		"\"edges\":[]}";
+	assert(!graph_config_load(write_temp_json(multi_out), &pl, &info, errbuf, sizeof(errbuf)));
+	assert(strstr(errbuf, "multi-port routing isn't executable yet") != NULL);
+	printf("PASS: rejects a stage declaring more than one output port (%s)\n", errbuf);
+
 	/* Missing input.ring_name */
 	const char *no_ring =
 		"{\"input\":{},\"nodes\":["

@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include "graph_config.h"
-#include "stage_registry.h"
+#include "plugin_loader.h"
 #include "json.h"
 
 #define MAX_NODES PIPELINE_MAX_STAGES
@@ -183,6 +183,15 @@ graph_config_load(const char *path, struct pipeline_chain *chain, struct graph_c
 		const struct stage *stage = stage_registry_find(n->type);
 		if (stage == NULL) {
 			snprintf(errbuf, errbuf_len, "node '%s': unknown stage type '%s'", n->id, n->type);
+			goto teardown_and_fail;
+		}
+		if (stage->max_out_ports != 1) {
+			snprintf(errbuf, errbuf_len,
+				 "node '%s' (type '%s'): declares %u output port(s), but "
+				 "this build's pipeline engine only supports single-output "
+				 "stages (max_out_ports == 1) - multi-port routing isn't "
+				 "executable yet",
+				 n->id, n->type, stage->max_out_ports);
 			goto teardown_and_fail;
 		}
 		if (stage->in_type != expected_in) {

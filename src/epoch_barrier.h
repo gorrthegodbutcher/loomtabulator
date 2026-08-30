@@ -57,6 +57,23 @@
  * understood fallback, not something to build without evidence it's
  * needed.
  *
+ * Update: that stress testing was actually run (while prototyping an
+ * unrelated Phase 3 hot-swap feature that would have added a second,
+ * similar flag alongside barrier_pending) and DID surface this race in
+ * practice - about 1% of plain runs and ~12% of -fsanitize=thread runs
+ * hit it. So "vanishingly unlikely" is now a measured ~1%, not a
+ * theoretical bound. Three fix attempts (the generation-counter grace
+ * period this comment names, an announce-before-check reordering, and
+ * producer-side epoch tagging) were tried; each closed the specific
+ * failure just found and stress-testing then found a different one -
+ * see CLAUDE.md's "Phase 3 design sketch" section for the fuller trace.
+ * None of those attempts are in this file - this is still the original,
+ * simple 3-atomics version, unfixed. Treat the ~1% number as current
+ * and real, and budget real effort (or a different approach entirely -
+ * a lock around the dequeue+enter sequence, or per-record epoch tags
+ * from the producer, are the two most promising directions tried so
+ * far) if this is ever revisited, not another quick attempt.
+ *
  * The drain wait is provably bounded and can't deadlock: stage.h's own
  * contract guarantees every process() call terminates with a definite
  * ok/drop result (no stage blocks indefinitely), so every in_flight
