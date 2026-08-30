@@ -57,11 +57,16 @@ and three function pointers:
   failing `init()` as a startup-time error, never something discovered
   mid-run.
 - `process(state, in, out)` - the hot path, called once per record.
-  `in->type` is always your declared `in_type`. On success, fill in
-  `*out` (type = your `out_type`, `data`/`len`/`capture_tsc` set) and
-  return `{.ok = true}`. Return `{.ok = false, .drop_reason = "..."}`
-  to drop the record - a normal outcome (e.g. failed validation), not
-  an error.
+  `in->type` is always your declared `in_type`. `*out` is
+  zero-initialized before every call - a guarantee loomtabulator's
+  pipeline runner commits to, not an incidental default - so any field
+  you don't explicitly care about (currently only `flags`) already
+  reads as its zero value on entry and can be left untouched. On
+  success, still explicitly fill in the fields you *do* own (`type` =
+  your `out_type`, `data`/`len`/`capture_tsc` always; `flags` only if
+  you're intentionally setting a bit) and return `{.ok = true}`. Return
+  `{.ok = false, .drop_reason = "..."}` to drop the record - a normal
+  outcome (e.g. failed validation), not an error.
 - `teardown(state)` - mirrors `init()`, called once per node at
   shutdown. Must handle a `NULL` state gracefully.
 
@@ -96,8 +101,9 @@ don't expect a graph using it to load successfully yet.
 
 `struct stage_record.flags` is a bitmask, currently defining one bit:
 `STAGE_RECORD_FLAG_INTEGRITY_FAILED`. It's entirely opt-in - a stage
-that never touches `out->flags` behaves exactly as before, and every
-record's `flags` defaults to `0` ("no flags"). Set this bit on your
+that never touches `out->flags` behaves exactly as before, since (per
+"process" above) `out` arrives zero-initialized and a stage that
+doesn't set the bit simply leaves it at that default. Set this bit on your
 output record when you're deliberately passing through a known-suspect
 payload instead of dropping it outright (for example, a checksum
 validation failure where you'd rather your caller receive a

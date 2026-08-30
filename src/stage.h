@@ -90,12 +90,12 @@ enum stage_port_type {
  * or otherwise known-suspect substitute, not genuine data" (e.g. a
  * checksum-validation stage configured to zero-fill instead of drop on
  * failure) without a downstream stage/consumer needing to inspect
- * payload bytes to notice. Purely opt-in and additive: a stage that
- * never sets it behaves exactly as before, and an unset stage_record's
- * flags is always 0 (matches every other unset-field default in this
- * struct). One bit for now - grow the bitmask later if a second
- * concrete need (e.g. which specific checksum failed) actually shows
- * up, rather than reserving ranges speculatively. */
+ * payload bytes to notice. Purely opt-in and additive: a stage
+ * indifferent to this bit can leave it untouched - see struct stage's
+ * own process() comment below for the caller-side zero-init guarantee
+ * that makes that safe. One bit for now - grow the bitmask later if a
+ * second concrete need (e.g. which specific checksum failed) actually
+ * shows up, rather than reserving ranges speculatively. */
 #define STAGE_RECORD_FLAG_INTEGRITY_FAILED (1u << 0)
 
 struct stage_record {
@@ -182,7 +182,17 @@ struct stage {
 	 * validation - a stage's process() never needs to check it itself).
 	 * On ok=true, the caller expects *out to be fully populated
 	 * (type=this stage's out_type, data/len/capture_tsc set) and passes
-	 * it on to the next stage; on ok=false, *out is ignored. */
+	 * it on to the next stage; on ok=false, *out is ignored.
+	 *
+	 * *out is zero-initialized by the caller before every call
+	 * (pipeline.c's own comment on this marks it a deliberate,
+	 * ABI-level guarantee, not incidental) - so out->flags in
+	 * particular already reads 0 on entry, and a stage indifferent to
+	 * STAGE_RECORD_FLAG_* need not touch it at all. A stage that DOES
+	 * care must still set it explicitly, same as type/len/capture_tsc:
+	 * "zeroed by default" is not "cleared for you before every
+	 * intermediate write," and a stage must not assume anything about
+	 * *out's contents beyond that initial zero state. */
 	struct stage_result (*process)(void *state, const struct stage_record *in,
 					struct stage_record *out);
 

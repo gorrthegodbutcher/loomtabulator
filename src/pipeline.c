@@ -27,6 +27,15 @@ pipeline_run(const struct pipeline_chain *chain, struct pipeline_worker *worker,
 
 	for (size_t i = 0; i < chain->stage_count; i++) {
 		const struct pipeline_stage_instance *inst = &chain->stages[i];
+		/* Deliberate, ABI-level guarantee (see stage.h's own comment
+		 * on struct stage.process): every field left off this
+		 * designated initializer - .type/.len/.capture_tsc/.flags -
+		 * is zeroed before process() ever sees it, so a stage that
+		 * doesn't care about e.g. STAGE_RECORD_FLAG_* can leave
+		 * out->flags untouched rather than needing an explicit
+		 * `.flags = 0`. Don't replace this with something that skips
+		 * the zero-fill (e.g. reusing a stale buffer via memcpy)
+		 * without updating that comment too. */
 		struct stage_record next = {
 			.data = worker->scratch[(i + 1) % 2],
 		};
