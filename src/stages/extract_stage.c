@@ -31,7 +31,13 @@
  *
  * Multiple extract instances in a chain can each pull a different
  * field/slice if a future graph wants more than one value out of the
- * same record - v1's example graph only uses one. */
+ * same record - v1's example graph only uses one.
+ *
+ * Failure (the configured offset/width or offset/length doesn't fit
+ * inside the record's actual payload) is flagged
+ * (STAGE_RECORD_FLAG_INTEGRITY_FAILED) and passed through as the whole
+ * original record, not hard-dropped - see extract_stage_process()'s own
+ * comment for why. */
 
 enum extract_mode {
 	EXTRACT_MODE_NUMERIC,
@@ -105,19 +111,35 @@ extract_stage_process(void *state, const struct stage_record *in, struct stage_r
 	const struct chrono_record_hdr *hdr = (const struct chrono_record_hdr *)in->data;
 	const uint8_t *payload = in->data + sizeof(*hdr);
 
-	if (cfg->mode == EXTRACT_MODE_NUMERIC) {
-		if ((uint64_t)cfg->field_offset_bytes + cfg->field_width_bytes > hdr->len)
-			return (struct stage_result){ .ok = false,
-				.drop_reason = "extract field falls outside payload" };
+	bool out_of_range = cfg->mode == EXTRACT_MODE_NUMERIC
+		? (uint64_t)cfg->field_offset_bytes + cfg->field_width_bytes > hdr->len
+		: (uint64_t)cfg->field_offset_bytes + cfg->field_length_bytes > hdr->len;
 
+	if (out_of_range) {
+		/* Can't produce the requested field/slice - there's nothing to
+		 * put in *out that would mean what the config asked for. But
+		 * this is a config/data-shape mismatch, not a structurally
+		 * unparseable record (hdr->len itself is fine), so - unlike
+		 * validate.c's own two structural failure cases - it's flagged
+		 * and passed through whole rather than hard-dropped: the
+		 * caller can wire this stage's "on_invalid"/invalid-record
+		 * edge to a dump_binary sink and get the exact original record
+		 * bytes that failed, for offline diagnosis, instead of just a
+		 * log line and a silently-uncounted drop. See stage.h's flag
+		 * comment and pipeline.c's dispatch loop for the mechanism. */
+		memcpy(out->data, in->data, in->len);
+		out->type = PORT_TYPE_RAW_RECORD;
+		out->len = in->len;
+		out->capture_tsc = in->capture_tsc;
+		out->flags |= STAGE_RECORD_FLAG_INTEGRITY_FAILED;
+		return (struct stage_result){ .ok = true };
+	}
+
+	if (cfg->mode == EXTRACT_MODE_NUMERIC) {
 		uint64_t raw = get_be(payload + cfg->field_offset_bytes, cfg->field_width_bytes);
 		put_be64(out->data, raw);
 		out->len = 8;
 	} else {
-		if ((uint64_t)cfg->field_offset_bytes + cfg->field_length_bytes > hdr->len)
-			return (struct stage_result){ .ok = false,
-				.drop_reason = "extract slice falls outside payload" };
-
 		memcpy(out->data, payload + cfg->field_offset_bytes, cfg->field_length_bytes);
 		out->len = cfg->field_length_bytes;
 	}

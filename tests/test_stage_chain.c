@@ -411,7 +411,7 @@ main(void)
 	struct stage_record raw = { .type = PORT_TYPE_RAW_RECORD, .data = record,
 				     .len = sizeof(struct chrono_record_hdr) + 16,
 				     .capture_tsc = 123456789 };
-	uint8_t buf1[256], buf2[256], buf3[256];
+	uint8_t buf1[256], buf2[256], buf3[256], buf4[256];
 	struct stage_record validated = { .data = buf1 };
 	struct stage_result r1 = validate_stage_process(validate_state, &raw, &validated);
 	assert(r1.ok);
@@ -461,14 +461,22 @@ main(void)
 	assert(!validate_stage_process(validate_state, &raw3, &out2).ok);
 	printf("PASS: validate rejects hdr->len/record-size mismatch\n");
 
-	/* extract rejects a field that falls outside the payload */
+	/* extract flags (doesn't hard-drop) a field that falls outside the
+	 * payload, passing the whole original record through unchanged so
+	 * it can be routed to a dump_binary quarantine sink for offline
+	 * diagnosis - see extract_stage.c's own comment. */
 	struct json_value *extract_oob_cfg =
 		parse_or_die("{\"field_offset_bytes\": 12, \"field_width_bytes\": 8}");
 	void *extract_oob_state = extract_stage_init(extract_oob_cfg);
 	assert(extract_oob_state != NULL);
-	struct stage_record oob_out = { .data = buf2 };
-	assert(!extract_stage_process(extract_oob_state, &validated, &oob_out).ok);
-	printf("PASS: extract rejects out-of-range field\n");
+	struct stage_record oob_out = { .data = buf4 };
+	struct stage_result r_oob = extract_stage_process(extract_oob_state, &validated, &oob_out);
+	assert(r_oob.ok);
+	assert(oob_out.flags & STAGE_RECORD_FLAG_INTEGRITY_FAILED);
+	assert(oob_out.type == PORT_TYPE_RAW_RECORD);
+	assert(oob_out.len == validated.len);
+	assert(memcmp(oob_out.data, validated.data, validated.len) == 0);
+	printf("PASS: extract flags (not drops) an out-of-range field, passing the record through whole\n");
 
 	/* extract_stage_init rejects an invalid field width */
 	struct json_value *bad_width_cfg =
