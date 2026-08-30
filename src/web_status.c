@@ -32,6 +32,7 @@ struct web_server_ctx {
 	int listen_fd;
 	struct app_web_status *status;
 	volatile bool *quit_flag;
+	volatile bool *reload_flag;
 	const char *web_root;
 	struct web_graph_ctx *graph_ctx;
 };
@@ -365,6 +366,26 @@ handle_post_graph(int fd, const char *body, size_t body_len, struct web_graph_ct
 		      "{ \"ok\": true, \"restart_required\": true }\n");
 }
 
+/* POST /api/reload: triggers a full, graceful restart, applying
+ * whatever graph is currently saved at --graph=PATH (normally just
+ * POSTed via handle_post_graph() above, though nothing requires that
+ * order - a reload with no prior save just re-loads the same file
+ * unchanged). Sends the response FIRST, then sets the flags - by the
+ * time the client sees this response, the actual shutdown+re-exec
+ * hasn't necessarily started yet, but it's already committed to
+ * happening (this connection's own fd is independent of the listening
+ * socket main.c's shutdown sequence will close, so finishing this
+ * response is unaffected either way). See main.c's own
+ * g_reload_requested comment for what actually happens after these
+ * flags are set - this function's only job is setting them. */
+static void
+handle_post_reload(int fd, volatile bool *quit_flag, volatile bool *reload_flag)
+{
+	send_response(fd, "200 OK", "application/json", "{ \"ok\": true, \"reloading\": true }\n");
+	*reload_flag = true;
+	*quit_flag = true;
+}
+
 /* POST /api/probe-port-count: the web UI needs to know how many output
  * ports a node will have, to decide how many handles to draw on it -
  * but out_port_count() is a per-INSTANCE, config-dependent property
@@ -521,7 +542,8 @@ serve_static_file(int fd, const char *web_root, const char *req_path)
 
 static void
 handle_connection(int fd, struct app_web_status *status, const char *web_root,
-		   struct web_graph_ctx *graph_ctx)
+		   struct web_graph_ctx *graph_ctx, volatile bool *quit_flag,
+		   volatile bool *reload_flag)
 {
 	struct http_request req;
 	if (!read_http_request(fd, &req)) {
@@ -538,6 +560,8 @@ handle_connection(int fd, struct app_web_status *status, const char *web_root,
 		handle_get_graph(fd, graph_ctx);
 	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/graph") == 0) {
 		handle_post_graph(fd, req.body != NULL ? req.body : "", req.body_len, graph_ctx);
+	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/reload") == 0) {
+		handle_post_reload(fd, quit_flag, reload_flag);
 	} else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/api/probe-port-count") == 0) {
 		handle_probe_port_count(fd, req.body != NULL ? req.body : "", req.body_len);
 	} else if (strcmp(req.method, "GET") == 0) {
@@ -564,7 +588,8 @@ server_thread_main(void *arg)
 		if (conn_fd < 0)
 			continue;
 
-		handle_connection(conn_fd, ctx->status, ctx->web_root, ctx->graph_ctx);
+		handle_connection(conn_fd, ctx->status, ctx->web_root, ctx->graph_ctx,
+				   ctx->quit_flag, ctx->reload_flag);
 		close(conn_fd);
 	}
 	return NULL;
@@ -572,7 +597,7 @@ server_thread_main(void *arg)
 
 int
 web_status_start(uint16_t web_port, struct app_web_status *status, volatile bool *quit_flag,
-		  const char *web_root, struct web_graph_ctx *graph_ctx)
+		  volatile bool *reload_flag, const char *web_root, struct web_graph_ctx *graph_ctx)
 {
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) {
@@ -603,6 +628,7 @@ web_status_start(uint16_t web_port, struct app_web_status *status, volatile bool
 	g_ctx.listen_fd = fd;
 	g_ctx.status = status;
 	g_ctx.quit_flag = quit_flag;
+	g_ctx.reload_flag = reload_flag;
 	g_ctx.web_root = web_root;
 	g_ctx.graph_ctx = graph_ctx;
 

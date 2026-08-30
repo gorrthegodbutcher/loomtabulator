@@ -344,3 +344,48 @@ export async function saveGraph(
   }
   return { ok: true };
 }
+
+/* POST /api/reload (src/web_status.c's handle_post_reload()) - triggers
+ * a full, graceful restart of the running binary (drain the ring, join
+ * every worker, tear down every stage, then main.c re-exec's itself),
+ * applying whatever graph is currently saved at --graph=PATH. Same PID
+ * throughout on the server side - nothing for this UI to track besides
+ * "did the request succeed, and is the server back up yet" (see
+ * waitForReload() below). */
+export async function reloadGraph(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch("/api/reload", { method: "POST" });
+    let json: { ok?: boolean } = {};
+    try {
+      json = await res.json();
+    } catch {
+      /* non-JSON response - fall through to the res.ok-based error below */
+    }
+    if (!res.ok || json.ok !== true) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/* Polls GET /api/graph until it answers again (confirming the reloaded
+ * instance is back up and serving) or timeoutMs elapses. The server
+ * closes its listening socket during the shutdown-then-re-exec window,
+ * so a fetch failing outright (connection refused) during that brief
+ * gap is expected, not an error - only a real timeout is. */
+export async function waitForReload(timeoutMs = 15000, intervalMs = 300): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch("/api/graph", { cache: "no-store" });
+      if (res.ok || res.status === 501) return true;
+    } catch {
+      /* listener down between the old instance's shutdown and the new
+       * one's startup - keep polling */
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}

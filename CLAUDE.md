@@ -371,6 +371,46 @@ section on faith):
   this section) - it's a pre-existing, documented, narrow risk, not a
   regression from this work; revisit it deliberately, on its own,
   rather than as a side effect of a web UI feature.
+- **"Restart" got a real trigger: `POST /api/reload`, and a clean-restart
+  guarantee.** "The web UI says restart is required" originally meant
+  an operator doing that by hand - `Ctrl+C` (or `kill`), relaunch,
+  repeat. Two things closed that gap, without reopening the hot-swap
+  question above (this is a full process restart, not a live
+  `pipeline_chain` swap - `epoch_barrier.c`/`pipeline_worker.c` are
+  untouched by any of this):
+  1. `main.c` now bakes in `--huge-unlink=existing` and
+     `--file-prefix=loomtabulator` as EAL defaults (an operator's own
+     `--file-prefix`/`--huge-unlink` on the command line always wins) -
+     verified empirically that a clean `SIGINT` shutdown (already
+     correctly calling `rte_eal_cleanup()`) does NOT, on its own,
+     remove its own hugepage-backed segment file or its
+     `/var/run/dpdk/<prefix>/` runtime directory; both persist and,
+     since every launch used DPDK's default `"rte"` prefix, kept
+     accumulating stale PID-tagged copies across every restart
+     indefinitely. `--huge-unlink=existing` has DPDK itself purge
+     whatever a *previous, already-exited* run left behind the moment a
+     *new* run starts, without touching a currently-live run's own
+     multi-process files - deliberately not `--in-memory`, which also
+     solves the file footprint but explicitly disables secondary-process
+     attachment entirely (this project needs that for Phase 4).
+  2. `POST /api/reload` (`src/web_status.c`'s `handle_post_reload()`)
+     triggers the *exact* same graceful shutdown `SIGINT` does (drain
+     the ring, join every worker, tear down every stage,
+     `rte_eal_cleanup()`), and then `main.c` re-exec's itself
+     (`execv("/proc/self/exe", ...)`) into a fresh instance that
+     re-reads `--graph=PATH` - picking up whatever graph is now saved
+     there. Same PID throughout (no `fork()`), so there's no parent
+     process left over to become a zombie, and no external supervisor
+     is needed. One non-obvious gotcha found and fixed empirically:
+     `execv()` preserves open file descriptors by default (only
+     `FD_CLOEXEC`-marked ones close), and `rte_eal_cleanup()` doesn't
+     close every fd it holds internally for hugepage/memzone
+     bookkeeping - those leaked across the re-exec and collided with
+     the fresh `rte_eal_init()` (`"EAL: Cannot allocate memzone list"`),
+     until `main.c` started force-closing every fd above stdio
+     immediately before `execv()`. The web UI's Save panel gained a
+     matching **Reload** button (`web/src/App.tsx`) that calls this
+     endpoint and polls `GET /api/graph` until the server answers again.
 - **Serving the built UI**: Vite's built `web/dist/` is multi-file and
   content-hashed, so it's served as plain static files
   (`serve_static_file()` in `src/web_status.c`) rather than embedded as
