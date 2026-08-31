@@ -153,7 +153,7 @@ directly: `./build/test_epoch_barrier`.
   does no sandboxing or vetting of plugins beyond the ABI-version
   check, an accepted tradeoff given it already runs in a container,
   not something the loader tries to mitigate. `STAGE_ABI_VERSION` is
-  currently `5`. Version 3: `struct stage.out_port_count(state)` (a
+  currently `6`. Version 3: `struct stage.out_port_count(state)` (a
   dynamic, per-graph-node callback - `NULL` means "always 1 port," the
   right default for every stage except a genuine leaf) replaced an
   earlier, short-lived `max_out_ports` static ceiling, and `struct
@@ -221,6 +221,41 @@ directly: `./build/test_epoch_barrier`.
   routing") let a graph author drop, pass through, or redirect flagged
   records to a completely separate downstream chain, all without
   touching a single stage's own code.
+
+  Version 6: added `struct stage.get_status(state, out)` - an optional
+  callback (`NULL`, the default, means "nothing to report") a stage
+  instance uses to expose its own named `uint64_t` counters (e.g.
+  `"records_checked"`, `"records_flagged"`) for the web UI to display.
+  Fixed-size, pointer-free `struct stage_status`/`struct
+  stage_status_field` (`stage.h`) - deliberately not a returned string
+  (no lifetime/ownership question crossing the ABI boundary, same
+  discipline `struct stage_record`/`struct stage_result` already use)
+  and deliberately counters-only for now, not a richer typed value
+  (every example this was designed against is a counter; widening later
+  is a small, additive change if a real need shows up). Called
+  periodically (`--status-poll-interval`, default 2s - deliberately
+  slow, not a hot-path concern) from `main.c`'s own status loop, never
+  from a worker lcore, via a new `app_web_status_update_stage_statuses()`
+  (`web_status.c`) that fills `struct app_web_status.stage_statuses[]`
+  under the same lock `records_in`/etc. already use, served by a new
+  `GET /api/stage-status` - see README.md's "Per-stage status
+  reporting". Since a node instance's state is already concurrently
+  written by every worker lcore that routes a record to it (the same
+  shared-state shape `forward_udp_stage.c`'s one socket already has), a
+  stage implementing this needs atomics for whatever it exposes -
+  `validate_stage.c` (`records_checked`/`records_flagged`) and
+  `dump_binary_stage.c` (`records_written`/`bytes_written`) are the two
+  reference implementations. `struct pipeline_stage_instance` also
+  gained `node_id` (`pipeline.h`, populated by `graph_config.c`) purely
+  so this endpoint can key its results by the graph's own node id
+  strings - engine-internal, not part of the ABI surface, so it isn't
+  independently why this bumped the ABI version. Web UI: a node with
+  status shows it in a hover tooltip (`StageNode.tsx`) and in a docked,
+  collapsible **Status** panel (`StatusPanel.tsx`), both driven by one
+  poll in `App.tsx`; large values are formatted with byte
+  (B/KB/MB/GB/TB) or engineering (K/M/B/T) unit suffixes
+  (`formatStatusValue()`, `graphApi.ts`) since some counters run into
+  the trillions.
 - **Startup-time validation over hot-path error handling.** A bad graph
   config is a refuse-to-run startup failure (`graph_config_load()`
   returning false with a clear message), never something discovered

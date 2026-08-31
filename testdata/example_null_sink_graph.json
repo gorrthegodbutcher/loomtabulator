@@ -1,0 +1,12 @@
+{
+  "loomtabulator_graph_version": 1,
+  "name": "null-sink-example",
+  "input": { "ring_name": "LOOM_INPUT_RING", "ring_size": 4096 },
+  "nodes": [
+    { "id": "n1", "type": "validate", "data": { "config": { "require_magic": true } } },
+    { "id": "n2", "type": "null_sink", "data": { "config": {} } }
+  ],
+  "edges": [
+    { "source": "n1", "target": "n2" }
+  ]
+}

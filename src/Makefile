@@ -52,7 +52,8 @@ PLUGINS_DIR := ../plugins
 
 plugins: $(PLUGINS_DIR)/validate.so $(PLUGINS_DIR)/extract.so \
 	 $(PLUGINS_DIR)/convert.so $(PLUGINS_DIR)/forward_udp.so \
-	 $(PLUGINS_DIR)/dump_binary.so $(PLUGINS_DIR)/dump_text.so
+	 $(PLUGINS_DIR)/dump_binary.so $(PLUGINS_DIR)/dump_text.so \
+	 $(PLUGINS_DIR)/null_sink.so
 
 $(PLUGINS_DIR):
 	@mkdir -p $@
@@ -68,6 +69,8 @@ $(PLUGINS_DIR)/forward_udp.so: stages/forward_udp_stage.c stages/forward_udp_sta
 $(PLUGINS_DIR)/dump_binary.so: stages/dump_binary_stage.c stages/dump_binary_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
 	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
 $(PLUGINS_DIR)/dump_text.so: stages/dump_text_stage.c stages/dump_text_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
+	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
+$(PLUGINS_DIR)/null_sink.so: stages/null_sink_stage.c stages/null_sink_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
 	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
 
 # What a third-party plugin developer vendors into their own repo - see
@@ -111,7 +114,7 @@ plugin-sdk:
 test: build
 	$(CC) -Wall -Wextra -I. -o build/test_stage_chain ../tests/test_stage_chain.c \
 		json.c pipeline.c stages/validate_stage.c stages/extract_stage.c stages/convert_stage.c \
-		stages/dump_binary_stage.c stages/dump_text_stage.c
+		stages/dump_binary_stage.c stages/dump_text_stage.c stages/null_sink_stage.c
 	./build/test_stage_chain
 	$(CC) -Wall -Wextra -I. -o build/test_graph_config ../tests/test_graph_config.c \
 		json.c pipeline.c graph_config.c ../tests/stub_stage_registry.c common.c \
