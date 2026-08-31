@@ -138,11 +138,11 @@ end" below for what to point at the receiving UDP port):
 Loaded as `.so` plugins at startup (`dlopen()`, scanned from
 `--plugins-dir`) - see `src/plugin_loader.c` for the loading mechanism
 and `src/stage.h`/`src/stage_abi.h` for the interface every stage type
-implements. The six built-ins below are rebuilt as plugins too
+implements. The seven built-ins below are rebuilt as plugins too
 (`make plugins` in `src/`, producing `plugins/{validate,extract,
-convert,forward_udp,dump_binary,dump_text}.so`), loaded through the
-exact same mechanism a third-party plugin uses - no special-casing
-between "built-in" and "external":
+convert,forward_udp,dump_binary,dump_text,null_sink}.so`), loaded
+through the exact same mechanism a third-party plugin uses - no
+special-casing between "built-in" and "external":
 
 - **`validate`** - confirms `chrono_record_hdr.magic`/`len` are sane.
   Config: `require_magic` (bool, default true). A `len` mismatch (or a
@@ -184,6 +184,15 @@ between "built-in" and "external":
   followed by a literal carriage return (`\r`, not `\n` - see
   `dump_text_stage.c`'s own comment), one value per record. Config:
   `path` (required; truncated on open).
+- **`null_sink`** - a leaf. The data-sink stage: accepts literally
+  anything (`raw_record`/`engineering`/`wire_frame` alike - every port
+  type that exists), counts records and bytes received (see "Per-stage
+  status reporting" below), and discards the data - no file, no socket,
+  no side effect beyond those two counters. Useful as a graph
+  terminator when you want to measure what's flowing through a branch
+  (or drop what a `validate`/`extract` stage flags as invalid - see
+  "Invalid-record routing" below) without actually persisting or
+  transmitting it anywhere. No config.
 
 ### Type simplification (version 5)
 
@@ -227,6 +236,35 @@ path, and a `dump_binary` quarantine file via `invalid_target`). The web
 UI (Phase 3) surfaces both knobs too: each stage node grows a second,
 red/dashed source handle for its invalid-record edge, and a right-click
 "On invalid: drop/pass" toggle in its context menu.
+
+### Per-stage status reporting (version 6)
+
+Any stage can optionally implement `struct stage.get_status(state,
+out)`, filling a small fixed-size struct with named `uint64_t` counters
+(e.g. `records_checked`, `bytes_written`) - `NULL` (the default) means
+"nothing to report." Polled periodically - `--status-poll-interval=N`
+seconds (default 2; deliberately slow, not a hot-path concern) - from a
+new `GET /api/stage-status`, which reports every node's current
+counters keyed by the graph's own node ids:
+
+```json
+[
+  { "node_id": "n1", "type": "validate",
+    "fields": [ { "name": "records_checked", "value": 1042 },
+                { "name": "records_flagged", "value": 3 } ] }
+]
+```
+
+`validate` (`records_checked`/`records_flagged`) and `dump_binary`
+(`records_written`/`bytes_written`) are the two built-in reference
+implementations. Since a node instance's state is already concurrently
+written by every worker lcore that routes a record to it, any stage
+exposing a counter this way needs atomics, same as those two use. The
+web UI polls this too: hovering a node with status shows it in a native
+tooltip, and a docked, collapsible **Status** panel on the right keeps
+a live-refreshing card per reporting node - large values are scaled
+with byte (`B`/`KB`/`MB`/`GB`/`TB`) or engineering (`K`/`M`/`B`/`T`)
+unit suffixes, since some counters run into the trillions.
 
 New stage types are built entirely outside this repo: implement
 `struct stage`'s init/process/teardown contract - a stage can accept

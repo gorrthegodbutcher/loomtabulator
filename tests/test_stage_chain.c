@@ -9,6 +9,7 @@
 #include "../src/stages/convert_stage.h"
 #include "../src/stages/dump_binary_stage.h"
 #include "../src/stages/dump_text_stage.h"
+#include "../src/stages/null_sink_stage.h"
 #include "../src/pipeline.h"
 
 /* DPDK-free: validate/extract/convert are all deliberately mbuf-free
@@ -438,6 +439,38 @@ run_get_status_test(void)
 	dump_binary_stage_teardown(binary_state);
 }
 
+/* null_sink: accepts anything, counts it, discards it, produces no
+ * output - exercised directly (init/process/get_status/teardown, no
+ * graph_config.c involved), same shape as run_dump_stage_tests()
+ * above. Feeds records of different lengths to prove bytes_received
+ * sums actual lengths, not just a per-record increment. */
+static void
+run_null_sink_test(void)
+{
+	void *state = null_sink_stage_init(NULL);
+	assert(state != NULL);
+
+	uint8_t chunk1[10] = {0};
+	uint8_t chunk2[25] = {0};
+	struct stage_record in1 = { .type = PORT_TYPE_RAW_RECORD, .data = chunk1, .len = sizeof(chunk1) };
+	struct stage_record in2 = { .type = PORT_TYPE_ENGINEERING, .data = chunk2, .len = sizeof(chunk2) };
+	struct stage_record out = {0};
+	assert(null_sink_stage_process(state, &in1, &out).ok);
+	assert(null_sink_stage_process(state, &in2, &out).ok);
+	assert(null_sink_stage_process(state, &in1, &out).ok);
+
+	struct stage_status status = {0};
+	null_sink_stage_get_status(state, &status);
+	assert(status.field_count == 2);
+	assert(strcmp(status.fields[0].name, "records_received") == 0);
+	assert(status.fields[0].value == 3);
+	assert(strcmp(status.fields[1].name, "bytes_received") == 0);
+	assert(status.fields[1].value == 10 + 25 + 10);
+	printf("PASS: null_sink_stage accepts raw_record/engineering alike, counts records/bytes, no output\n");
+
+	null_sink_stage_teardown(state);
+}
+
 int
 main(void)
 {
@@ -561,6 +594,7 @@ main(void)
 	run_invalid_routing_test();
 	run_dump_stage_tests();
 	run_get_status_test();
+	run_null_sink_test();
 
 	printf("\nALL TESTS PASSED\n");
 	return 0;
