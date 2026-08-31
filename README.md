@@ -341,18 +341,20 @@ core header: PLI/cHEC/Type/tHEC/CID/Spare/eHEC, no optional pFCS) +
 1024 bytes payload = **1068 bytes/record**. 6.75 Gbps ÷ 8 ÷ 1068 ≈
 **790,225 records/sec**, i.e. one record roughly every 1.27
 microseconds, sustained. At that rate, `ring_size: 4096` only buffers
-≈5.2ms before a stall causes drops; `testdata/gfp_router_graph.json`
-uses `ring_size: 8192` (≈10.4ms of margin) for exactly this reason -
-bump further (16384, ≈20.8ms) if your deployment's worst-case stall is
-longer than that.
+≈5.2ms before a stall causes drops; `ring_size: 8192` gives ≈10.4ms of
+margin - bump further (16384, ≈20.8ms) if your deployment's worst-case
+stall is longer than that. (`testdata/gfp_router_graph.json` is a
+local, gitignored graph tuned this way for one specific deployment -
+not a checked-in example; use `testdata/example_branching_graph.json`
+as the template for a graph of your own.)
 
 **Benchmarking whether a target rate is actually sustainable** (the
 question ring size alone can't answer) needs a real load generator
 feeding the ring, not just a bigger buffer:
 ```
-# terminal 1 - the pipeline itself
+# terminal 1 - the pipeline itself (substitute your own graph)
 ./build/loomtabulator -l 1,2 --no-pci -- \
-  --graph=../testdata/gfp_router_graph.json --plugins-dir=../plugins \
+  --graph=../testdata/your_graph.json --plugins-dir=../plugins \
   --web-port=8080 --workers=1
 
 # terminal 2 - a real DPDK secondary-process producer (a separate,
