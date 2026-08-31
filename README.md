@@ -98,8 +98,10 @@ restarts). Skipped automatically if you pass `--no-huge` yourself
   for a worked multi-port example).
 - `--web-port=N` - `GET /status.json` (records in/dropped/forwarded,
   uptime), `GET /api/stage-types` (Phase 3 web UI's palette data),
-  `GET /api/graph` / `POST /api/graph` (load/save the graph file - a
-  save validates but does not affect the running pipeline),
+  `GET /api/graph` / `POST /api/graph` (load/save the *active* graph
+  file - a save validates but does not affect the running pipeline),
+  `GET/POST /api/graphs`, `POST /api/graphs/load`, `DELETE /api/graphs`
+  (the graph *library* in `--graphs-dir` - see below),
   `POST /api/reload` (gracefully restarts the process in place -
   same PID, via `execv()` - applying whatever graph is currently
   saved; the web UI's Save panel has a matching Reload button), and
@@ -112,6 +114,16 @@ restarts). Skipped automatically if you pass `--no-huge` yourself
   at startup (see "Stage types" below). Default `../plugins` (matches
   running `./build/loomtabulator` from within `src/`); a missing or
   empty directory loads zero plugins, not an error.
+- `--graphs-dir=PATH` - a library of named `.json` graphs the web UI's
+  "Manage graphs..." dialog can list, upload into, load from (making
+  one the *active* graph - same "writes to `--graph=PATH`, restart
+  required" effect Save has - see `POST /api/graphs/load` above), and
+  delete from. Distinct from `--graph=PATH` itself, which always names
+  the one currently-active graph, not this directory. Default `../graphs`
+  (matches running `./build/loomtabulator` from within `src/`); created
+  automatically if missing. Gitignored (`/graphs/`) - it's local,
+  per-deployment state, not checked-in example content (same posture as
+  `testdata/gfp_router_graph.json` above).
 - `--workers=N` - worker lcores to run the pipeline on. Default: EAL
   lcore count minus 1 (the main lcore is orchestration-only - status
   ticks and shutdown, never blocked inside a barrier drain). Must be

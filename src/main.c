@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <rte_eal.h>
 #include <rte_ring.h>
 #include <rte_cycles.h>
@@ -199,6 +200,7 @@ struct app_opts {
 	uint16_t web_port;
 	const char *web_root;
 	const char *plugins_dir;
+	const char *graphs_dir;
 	bool testgen_enabled; /* off by default - see --testgen-enable below */
 	uint32_t testgen_rate;
 	uint64_t testgen_count;
@@ -225,6 +227,11 @@ usage(void)
 		"                      (built-in stages are plugins too - see\n"
 		"                      plugin-sdk/README.md), default ../plugins\n"
 		"                      relative to cwd (empty string = load none)\n"
+		"  --graphs-dir=PATH   directory holding the web UI's library of named\n"
+		"                      graphs (GET/POST /api/graphs, POST\n"
+		"                      /api/graphs/load, DELETE /api/graphs) - created\n"
+		"                      automatically if missing, default ../graphs\n"
+		"                      relative to cwd\n"
 		"  --workers=N         worker lcores to run the pipeline on, default:\n"
 		"                      (EAL lcore count - 1). Must be <= that.\n"
 		"  --status-poll-interval=N\n"
@@ -257,6 +264,7 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 		{"web-port", required_argument, 0, 'W'},
 		{"web-root", required_argument, 0, 'R'},
 		{"plugins-dir", required_argument, 0, 'P'},
+		{"graphs-dir", required_argument, 0, 'G'},
 		{"workers", required_argument, 0, 'N'},
 		{"testgen-enable", no_argument, 0, 'e'},
 		{"testgen-rate", required_argument, 0, 'r'},
@@ -272,17 +280,19 @@ parse_args(int argc, char **argv, struct app_opts *opts)
 	opts->web_port = 8080;
 	opts->web_root = "../web/dist";
 	opts->plugins_dir = "../plugins";
+	opts->graphs_dir = "../graphs";
 	opts->testgen_payload_len = 16;
 	opts->status_poll_interval_sec = 2;
 
 	optind = 1;
 	int opt;
-	while ((opt = getopt_long(argc, argv, "g:W:R:P:N:er:c:p:b:S:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "g:W:R:P:G:N:er:c:p:b:S:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'g': opts->graph_path = optarg; break;
 		case 'W': opts->web_port = (uint16_t)strtoul(optarg, NULL, 10); break;
 		case 'R': opts->web_root = optarg; break;
 		case 'P': opts->plugins_dir = optarg; break;
+		case 'G': opts->graphs_dir = optarg; break;
 		case 'N': opts->workers = (unsigned int)strtoul(optarg, NULL, 10); break;
 		case 'e': opts->testgen_enabled = true; break;
 		case 'r': opts->testgen_rate = (uint32_t)strtoul(optarg, NULL, 10); break;
@@ -372,11 +382,23 @@ main(int argc, char **argv)
 	struct app_web_status status;
 	app_web_status_init(&status);
 
-	struct web_graph_ctx graph_ctx = { .graph_path = opts.graph_path };
+	struct web_graph_ctx graph_ctx = { .graph_path = opts.graph_path, .graphs_dir = opts.graphs_dir };
 	graph_ctx.current_graph_json = read_file_contents(opts.graph_path, &graph_ctx.current_graph_len);
 	if (graph_ctx.current_graph_json == NULL)
 		fprintf(stderr, "loomtabulator: warning: couldn't re-read '%s' for GET /api/graph "
 				 "(status.json and the running pipeline are unaffected)\n", opts.graph_path);
+
+	/* Created eagerly, unlike --plugins-dir (where "missing" just means
+	 * "load zero plugins, not an error") - a missing graphs_dir would
+	 * make every GET/POST /api/graphs request fail with a confusing
+	 * "failed to open/write" error instead of just working on first run.
+	 * Non-fatal on failure (same posture as read_file_contents() above):
+	 * the graph library becomes unusable, but the pipeline itself is
+	 * unaffected either way. */
+	if (mkdir(opts.graphs_dir, 0755) != 0 && errno != EEXIST)
+		fprintf(stderr, "loomtabulator: warning: couldn't create graphs directory '%s': %s "
+				 "(the graph library API will fail until this is fixed)\n",
+				 opts.graphs_dir, strerror(errno));
 
 	if (opts.web_port != 0 &&
 	    web_status_start(opts.web_port, &status, &g_shutdown_requested, &g_reload_requested,

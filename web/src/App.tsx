@@ -33,6 +33,7 @@ import {
 } from "./graphApi";
 import { StageNode } from "./StageNode";
 import { StatusPanel } from "./StatusPanel";
+import { GraphLibraryDialog } from "./GraphLibraryDialog";
 
 // How often to poll GET /api/stage-status - independent of (and much
 // more frequent than the extreme end of) the server's own
@@ -69,6 +70,14 @@ function App() {
   const [reloadStatus, setReloadStatus] = useState<
     { kind: "idle" | "reloading" | "ok" | "error"; message?: string }
   >({ kind: "idle" });
+  // No "error" kind here - GraphLibraryDialog surfaces its own Load
+  // failures inline (it stays open and never calls onLoaded), so this
+  // only ever needs to report a *successful* load, same as onLoaded's
+  // own doc comment says.
+  const [loadStatus, setLoadStatus] = useState<{ kind: "idle" | "ok"; message?: string }>({
+    kind: "idle",
+  });
+  const [showGraphLibrary, setShowGraphLibrary] = useState(false);
   const [stageStatuses, setStageStatuses] = useState<Record<string, StageStatusEntry>>({});
   const [statusPanelCollapsed, setStatusPanelCollapsed] = useState(false);
   const graphMeta = useRef<GraphMeta>(DEFAULT_META);
@@ -79,33 +88,40 @@ function App() {
   );
   const [configNotice, setConfigNotice] = useState<string | null>(null);
 
+  // Fetches GET /api/graph and populates the canvas from it - shared by
+  // the mount-time effect below and by handleGraphLoaded (called after
+  // GraphLibraryDialog's Load activates a different graph server-side,
+  // so the canvas needs the same refresh treatment startup already gets).
+  const refreshGraphFromServer = useCallback(async (types: StageType[]) => {
+    const graph = await fetchGraph(types);
+    if (graph === null) {
+      setGraphApiEnabled(false); // binary running without a web_graph_ctx
+      return;
+    }
+    graphMeta.current = graph.meta;
+    setNodes(graph.nodes);
+    setEdges(graph.edges);
+    // A loaded graph can already contain "new-N" ids from an earlier UI
+    // session (nextNewNodeId is module-level state, reset to 1 on every
+    // fresh page load) - without this, the next addStageNode() call
+    // reissues an id already in the graph, and since React Flow indexes
+    // nodes by id, the freshly added node silently replaces the existing
+    // one at that id instead of appending a new one.
+    const maxLoadedNewId = graph.nodes.reduce((max, n) => {
+      const m = /^new-(\d+)$/.exec(n.id);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+    nextNewNodeId = Math.max(nextNewNodeId, maxLoadedNewId + 1);
+  }, []);
+
   useEffect(() => {
     fetchStageTypes()
       .then(async (types) => {
         setStageTypes(types);
-        const graph = await fetchGraph(types);
-        if (graph === null) {
-          setGraphApiEnabled(false); // binary running without a web_graph_ctx
-          return;
-        }
-        graphMeta.current = graph.meta;
-        setNodes(graph.nodes);
-        setEdges(graph.edges);
-        // A loaded graph can already contain "new-N" ids from an
-        // earlier UI session (nextNewNodeId is module-level state, reset
-        // to 1 on every fresh page load) - without this, the next
-        // addStageNode() call reissues an id already in the graph, and
-        // since React Flow indexes nodes by id, the freshly added node
-        // silently replaces the existing one at that id instead of
-        // appending a new one.
-        const maxLoadedNewId = graph.nodes.reduce((max, n) => {
-          const m = /^new-(\d+)$/.exec(n.id);
-          return m ? Math.max(max, Number(m[1])) : max;
-        }, 0);
-        nextNewNodeId = Math.max(nextNewNodeId, maxLoadedNewId + 1);
+        await refreshGraphFromServer(types);
       })
       .catch((err) => setLoadError(String(err)));
-  }, []);
+  }, [refreshGraphFromServer]);
 
   // Live per-stage status (GET /api/stage-status, ABI v6's struct
   // stage.get_status()) - polled on a fixed client-side interval,
@@ -207,6 +223,16 @@ function App() {
       backUp ? { kind: "ok" } : { kind: "error", message: "timed out waiting for it to come back up" },
     );
   }, []);
+
+  // Called by GraphLibraryDialog after a successful Load - the server
+  // has already activated the chosen graph (written it to --graph=PATH,
+  // same effect Save has), so the canvas needs the same GET /api/graph
+  // refresh startup does to actually show it, ahead of the still-manual
+  // Reload step that applies it to the running pipeline.
+  const handleGraphLoaded = useCallback(async () => {
+    await refreshGraphFromServer(stageTypes);
+    setLoadStatus({ kind: "ok", message: "Loaded - click Reload to apply it." });
+  }, [refreshGraphFromServer, stageTypes]);
 
   // Right-click node menu: Rename/Delete. Rename only ever touches
   // data.label (never data.type/id - those have to stay the real
@@ -397,6 +423,14 @@ function App() {
         <button
           className="btn"
           style={{ marginTop: 8 }}
+          onClick={() => setShowGraphLibrary(true)}
+          disabled={!graphApiEnabled}
+        >
+          Manage graphs...
+        </button>
+        <button
+          className="btn"
+          style={{ marginTop: 8 }}
           onClick={onReload}
           disabled={!graphApiEnabled || reloadStatus.kind === "reloading"}
           title="Gracefully restarts loomtabulator, applying whatever graph is currently saved"
@@ -434,6 +468,9 @@ function App() {
           <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
             Reload failed: {reloadStatus.message}
           </p>
+        )}
+        {loadStatus.kind === "ok" && (
+          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>{loadStatus.message}</p>
         )}
         {configNotice && (
           <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>{configNotice}</p>
@@ -508,6 +545,10 @@ function App() {
             </button>
           </div>
         </>
+      )}
+
+      {showGraphLibrary && (
+        <GraphLibraryDialog onClose={() => setShowGraphLibrary(false)} onLoaded={handleGraphLoaded} />
       )}
 
       {configEditor && (
