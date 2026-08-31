@@ -321,6 +321,65 @@ the first and 2 (the records whose counter value's low byte is `42`)
 to the second - proof the routing decision, not just the graph
 validation, actually executes.
 
+## Sizing the input ring, and benchmarking sustained throughput
+
+`--graph=PATH`'s `input.ring_size` (a `rte_ring`, so must be a power of
+2) trades off two genuinely separate things: whether the pipeline can
+*sustain* a given record rate at all (a function of per-record
+processing cost and worker count, not ring size), and how long the
+ring can absorb a *stall* in the consumer (a worker blocked in
+`epoch_barrier.c`'s drain, a scheduling hiccup, etc.) before the
+producer's `rte_ring_enqueue()` starts failing and records are
+dropped. Ring slots are just pointers (8 bytes each), so sizing
+generously costs next to nothing in memory - the real question is how
+many milliseconds of stall you want to tolerate at your target rate.
+
+**Worked example**: 6.75 Gbps aggregate GFP ingestion, 1024-byte
+client payload, spread across multiple CIDs. Per-record size on
+`LOOM_INPUT_RING` is 32 bytes (`chrono_record_hdr`) + 12 bytes (GFP
+core header: PLI/cHEC/Type/tHEC/CID/Spare/eHEC, no optional pFCS) +
+1024 bytes payload = **1068 bytes/record**. 6.75 Gbps ÷ 8 ÷ 1068 ≈
+**790,225 records/sec**, i.e. one record roughly every 1.27
+microseconds, sustained. At that rate, `ring_size: 4096` only buffers
+≈5.2ms before a stall causes drops; `testdata/gfp_router_graph.json`
+uses `ring_size: 8192` (≈10.4ms of margin) for exactly this reason -
+bump further (16384, ≈20.8ms) if your deployment's worst-case stall is
+longer than that.
+
+**Benchmarking whether a target rate is actually sustainable** (the
+question ring size alone can't answer) needs a real load generator
+feeding the ring, not just a bigger buffer:
+```
+# terminal 1 - the pipeline itself
+./build/loomtabulator -l 1,2 --no-pci -- \
+  --graph=../testdata/gfp_router_graph.json --plugins-dir=../plugins \
+  --web-port=8080 --workers=1
+
+# terminal 2 - a real DPDK secondary-process producer (a separate,
+# unpublished internal tool - any producer attaching to the same named
+# ring works, testgen.c included, as long as it can hit line rate)
+./gfp_test_driver -l 3 --proc-type=secondary --no-pci \
+  --file-prefix=loomtabulator -- --rate=0 --count=0 \
+  --cids=1,2,3,4 --payload-size=1024
+
+# terminal 3 - sample records_forwarded twice a few seconds apart
+curl -s localhost:8080/status.json
+```
+`(records_forwarded delta) / (time delta)` is the sustained rate;
+`records_dropped` climbing means the ring is filling faster than
+workers drain it - the actual signal to raise `--workers=N` or
+investigate per-record overhead in `src/pipeline_worker.c`'s hot loop,
+not just the ring size. Measured on this codebase as of the
+`gfp_extract` plugin's addition: **3.13M rec/s at `--workers=1`**,
+**4.16M rec/s at `--workers=2`** (sub-linear scaling - `epoch_barrier.c`'s
+shared `in_flight` atomic is contended across cores, a known, deliberately
+deferred cost - see that file's own header comment) - both comfortably
+over the 790,225 rec/s target with zero drops, so no code changes were
+needed to hit this particular rate. Redo this measurement rather than
+trusting last session's numbers if you change `pipeline_worker.c`,
+change stage plugins on the hot path, or target a meaningfully higher
+rate.
+
 ## Roadmap
 
 Working now: the stage-tree mechanism (including multi-port routing -
