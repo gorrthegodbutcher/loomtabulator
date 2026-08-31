@@ -284,8 +284,25 @@ directly: `./build/test_epoch_barrier`.
   below for why hot-swap was deliberately not built, and what a restart
   needs to look like instead. No per-stage config editor yet either -
   a loaded node's `data.config` round-trips unedited through the UI.
+  A "Manage graphs..." dialog rounds out Save/Reload with a small
+  library of named graphs in `--graphs-dir` (`GET/POST /api/graphs`,
+  `POST /api/graphs/load`, `DELETE /api/graphs` - see README.md's Usage
+  section) - Load activates one the same way Save does (writes to
+  `--graph=PATH`, still needs Reload to apply); Upload only adds to the
+  library, it doesn't activate.
 - No real chrontabulator integration - `testgen.c`'s synthetic
   generator is the only input source that exists today. Phase 4.
+- No multi-instance daisy-chaining yet - `docs/MANAGEMENT.md` specs out
+  how several loomtabulator instances would chain via a new
+  `ring_output` stage (a DPDK ring producer, symmetric to
+  `ring_input.c`'s consumer) and how an external supervisor (a separate
+  project, not part of this repo) is meant to manage that chain's
+  restart ordering - loomtabulator itself will not grow any
+  sibling-awareness or self-triggered cascading-restart logic. The
+  `ring_output` stage itself doesn't exist yet; the spec's Part 1
+  (today's single-instance management contract - CLI flags, health
+  signals, `POST /api/reload` vs. `SIGINT`/`SIGTERM`) is real and
+  already true today, independent of whether Part 2 is ever built.
 - No `rte_reorder` - deliberately not used; the epoch/watermark barrier
   in `src/epoch_barrier.c` is the cheaper mechanism chosen instead (see
   that file's own header comment). Revisit only if testing ever shows
