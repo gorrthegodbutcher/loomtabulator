@@ -295,8 +295,25 @@ function App() {
   // port count immediately redraws the right number of handles. Any
   // edge whose source_port no longer fits is dropped automatically
   // (surfaced as a brief notice) rather than left stale on the canvas.
+  //
+  // The ring-input node is a special case throughout this function and
+  // handleSaveConfig below - it's a synthetic canvas anchor (see
+  // makeRingInputNode() in graphApi.ts), not a real stage, so it has no
+  // data.config/stage type to probe a port count for. It edits
+  // graphMeta.current.input (ring_name/ring_size/record_type) instead -
+  // the top-level graph field saveGraph() already echoes back verbatim,
+  // same "opaque, unvalidated until Save" posture every other node's
+  // config already has (graph_config_load() is what actually validates
+  // ring_name/ring_size server-side, same as it validates every other
+  // node's config).
   const handleOpenConfigure = useCallback(
     (nodeId: string) => {
+      if (nodeId === RING_INPUT_NODE_ID) {
+        setConfigEditor({ nodeId, text: JSON.stringify(graphMeta.current.input, null, 2), error: null });
+        setConfigNotice(null);
+        setContextMenu(null);
+        return;
+      }
       const node = nodes.find((n) => n.id === nodeId);
       if (node) {
         setConfigEditor({ nodeId, text: JSON.stringify(node.data.config ?? {}, null, 2), error: null });
@@ -310,13 +327,20 @@ function App() {
   const handleSaveConfig = useCallback(async () => {
     if (!configEditor) return;
 
-    let parsedConfig: unknown;
+    let parsed: unknown;
     try {
-      parsedConfig = JSON.parse(configEditor.text);
+      parsed = JSON.parse(configEditor.text);
     } catch (err) {
       setConfigEditor((ce) => (ce ? { ...ce, error: `Invalid JSON: ${String(err)}` } : ce));
       return;
     }
+
+    if (configEditor.nodeId === RING_INPUT_NODE_ID) {
+      graphMeta.current = { ...graphMeta.current, input: parsed as Record<string, unknown> };
+      setConfigEditor(null);
+      return;
+    }
+    const parsedConfig = parsed;
 
     const node = nodes.find((n) => n.id === configEditor.nodeId);
     if (!node) {
@@ -523,7 +547,11 @@ function App() {
             </button>
             <button
               className="context-menu-item"
-              disabled={contextMenuNode?.id === RING_INPUT_NODE_ID}
+              title={
+                contextMenuNode?.id === RING_INPUT_NODE_ID
+                  ? "Edit the input ring's name/size (graph.input) - not a real stage"
+                  : undefined
+              }
               onClick={() => handleOpenConfigure(contextMenu.nodeId)}
             >
               Configure
@@ -577,8 +605,11 @@ function App() {
               Configure: {nodes.find((n) => n.id === configEditor.nodeId)?.data.label ?? configEditor.nodeId}
             </p>
             <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: -8 }}>
-              Raw JSON - this stage's config shape isn't known to the UI. Saving re-checks how many
-              output ports this stage has and redraws its handles.
+              {configEditor.nodeId === RING_INPUT_NODE_ID
+                ? "Raw JSON - the graph's top-level \"input\" (ring_name/ring_size/record_type). Not " +
+                  "validated until Save - graph_config_load() checks it server-side, same as any stage's config."
+                : "Raw JSON - this stage's config shape isn't known to the UI. Saving re-checks how many " +
+                  "output ports this stage has and redraws its handles."}
             </p>
             <textarea
               value={configEditor.text}
