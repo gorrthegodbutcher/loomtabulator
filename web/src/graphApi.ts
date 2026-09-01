@@ -291,9 +291,21 @@ export async function probePortCount(type: string, config: unknown): Promise<num
 
 /* GET /api/graph returns 501 if the binary wasn't wired up with a
  * web_graph_ctx (see web_status.h) - null here means "no graph API
- * available", distinct from a real fetch error. */
+ * available", distinct from a real fetch error.
+ *
+ * cache: "no-store" is required, not optional - web_status.c's
+ * send_response() never sends a Cache-Control header at all, so without
+ * this the browser's own default HTTP caching heuristics can serve a
+ * STALE response here: call this again right after activating a
+ * different graph (POST /api/graphs/load, see handleGraphLoaded in
+ * App.tsx) and a cached copy of whatever was fetched earlier in the
+ * page's lifetime can come back instead of the server's actual current
+ * content - the canvas (and this graph's own .name) then silently don't
+ * match what's really active. waitForReload() below already knew to add
+ * this; this call needs it even more, since it's not just polling for
+ * "is the server back up" but reading content that has to be accurate. */
 export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph | null> {
-  const res = await fetch("/api/graph");
+  const res = await fetch("/api/graph", { cache: "no-store" });
   if (res.status === 501) return null;
   if (!res.ok) throw new Error(`GET /api/graph failed: ${res.status}`);
 

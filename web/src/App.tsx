@@ -86,6 +86,25 @@ function App() {
   const [stageStatuses, setStageStatuses] = useState<Record<string, StageStatusEntry>>({});
   const [statusPanelCollapsed, setStatusPanelCollapsed] = useState(false);
   const graphMeta = useRef<GraphMeta>(DEFAULT_META);
+  // graphMeta is a ref (mutating it doesn't trigger a re-render, which is
+  // fine for its other reader - onSave/onSaveAs only need its CURRENT
+  // value at click time) - but the bottom-of-sidebar name display below
+  // needs to actually re-render when it changes, so its name is mirrored
+  // into this bit of real state at the two places graphMeta.current gets
+  // a genuinely different graph assigned (refreshGraphFromServer, New
+  // graph) - not at every graphMeta.current mutation (e.g. editing
+  // input.position/ring_name via Configure doesn't change .name).
+  const [graphName, setGraphName] = useState(DEFAULT_META.name);
+  // The graph library filename this canvas actually came from, if the UI
+  // has ever been told one (via Load or a successful Save As) - null at
+  // startup, since the backend never exposes what --graph=PATH itself
+  // was launched with. Used only to default Save As's own filename
+  // prompt sensibly - graphMeta.current.name (the graph's own internal
+  // "name" JSON field) has no required relationship to its real on-disk
+  // filename, so guessing from that instead was actively misleading
+  // (suggesting e.g. "v1-example-pipeline.json" for a graph opened from
+  // gfp_router_graph.json).
+  const [activeGraphFilename, setActiveGraphFilename] = useState<string | null>(null);
   // Captured via <ReactFlow>'s onInit below - lets addStageNode() place a
   // newly-added node at the CURRENT viewport's center (screenToFlowPosition
   // converts screen/client pixels to flow coordinates, accounting for
@@ -138,6 +157,7 @@ function App() {
       return;
     }
     graphMeta.current = graph.meta;
+    setGraphName(graph.meta.name);
     setNodes(graph.nodes);
     setEdges(graph.edges);
     pendingFitView.current = true;
@@ -152,6 +172,21 @@ function App() {
       return m ? Math.max(max, Number(m[1])) : max;
     }, 0);
     nextNewNodeId = Math.max(nextNewNodeId, maxLoadedNewId + 1);
+
+    // A graph file saved before input.position existed has no saved
+    // ring-input position - fetchGraph() already computed a reasonable
+    // fallback for THIS load (220px left of the first node) and put the
+    // ring-input node there. Deliberately NOT auto-saving that back to
+    // disk here: an earlier version of this did, in the background,
+    // right after load - and that raced any Save the user made shortly
+    // after loading (two concurrent POST /api/graph calls, whichever
+    // response landed second wins) - if the background save's older,
+    // pre-edit snapshot completed after the user's own real edit, it
+    // silently clobbered it. No separate fix needed instead: buildRawGraph()
+    // already writes the ring-input node's CURRENT position into
+    // input.position on every save regardless of whether the file had
+    // one before, so this self-heals the moment the user saves anything
+    // normally - no race, no extra write path to get wrong.
   }, []);
 
   useEffect(() => {
@@ -283,11 +318,35 @@ function App() {
     ]);
   }, [viewportCenterPosition]);
 
+  // Also syncs the library copy this canvas is known to have come from
+  // (activeGraphFilename - set by Load or a prior Save As, see its own
+  // comment), if any - without this, POST /api/graph (the active file)
+  // and the library entry silently diverge: Load a library graph, edit
+  // it, Save (writes only the active file, POST /api/graph never touches
+  // graphs_dir - confirmed in web_status.c), then Load that SAME library
+  // entry again later - it re-copies the untouched, stale library file
+  // back over the active one, quietly discarding the edit. Syncing both
+  // here makes Save behave the way it reads: you opened a named graph,
+  // you hit Save, it's actually saved, not just half of it.
   const onSave = useCallback(async () => {
     setSaveStatus({ kind: "saving" });
     const result = await saveGraph(graphMeta.current, nodes, edges);
-    setSaveStatus(result.ok ? { kind: "ok" } : { kind: "error", message: result.error });
-  }, [nodes, edges]);
+    if (!result.ok) {
+      setSaveStatus({ kind: "error", message: result.error });
+      return;
+    }
+    if (activeGraphFilename != null) {
+      const libraryResult = await saveGraphAs(activeGraphFilename, graphMeta.current, nodes, edges);
+      if (!libraryResult.ok) {
+        setSaveStatus({
+          kind: "error",
+          message: `Saved the active graph, but failed to sync "${activeGraphFilename}" in the library: ${libraryResult.error}`,
+        });
+        return;
+      }
+    }
+    setSaveStatus({ kind: "ok" });
+  }, [nodes, edges, activeGraphFilename]);
 
   // Save As: prompts for a filename (forcing ".json", same convention
   // GraphLibraryDialog's own Upload uses for a dropped-in file without
@@ -297,19 +356,23 @@ function App() {
   // it active). window.prompt(), same simple-text-input convention
   // handleRename already uses below, rather than a bespoke dialog.
   const onSaveAs = useCallback(async () => {
-    const suggested = graphMeta.current.name ? `${graphMeta.current.name}.json` : "graph.json";
+    const suggested =
+      activeGraphFilename ?? (graphMeta.current.name ? `${graphMeta.current.name}.json` : "graph.json");
     const raw = window.prompt("Save as (filename)", suggested);
     if (!raw) return; // cancelled, or an empty name
     const name = raw.endsWith(".json") ? raw : `${raw}.json`;
 
     setSaveAsStatus({ kind: "saving" });
     const result = await saveGraphAs(name, graphMeta.current, nodes, edges);
+    if (result.ok) {
+      setActiveGraphFilename(name);
+    }
     setSaveAsStatus(
       result.ok
         ? { kind: "ok", message: `Saved as "${name}" in the library.` }
         : { kind: "error", message: result.error },
     );
-  }, [nodes, edges]);
+  }, [nodes, edges, activeGraphFilename]);
 
   // New Graph: resets the canvas to a blank one (client-side only, no
   // server call - nothing is persisted until Save/Save As). Confirms
@@ -320,6 +383,8 @@ function App() {
       return;
     }
     graphMeta.current = { ...DEFAULT_META, input: { ...DEFAULT_META.input } };
+    setGraphName(DEFAULT_META.name);
+    setActiveGraphFilename(null);
     setNodes([makeRingInputNode(40, 100)]);
     setEdges([]);
     setSaveStatus({ kind: "idle" });
@@ -349,11 +414,17 @@ function App() {
   // has already activated the chosen graph (written it to --graph=PATH,
   // same effect Save has), so the canvas needs the same GET /api/graph
   // refresh startup does to actually show it, ahead of the still-manual
-  // Reload step that applies it to the running pipeline.
-  const handleGraphLoaded = useCallback(async () => {
-    await refreshGraphFromServer(stageTypes);
-    setLoadStatus({ kind: "ok", message: "Loaded - click Reload to apply it." });
-  }, [refreshGraphFromServer, stageTypes]);
+  // Reload step that applies it to the running pipeline. `name` is the
+  // library filename that was just loaded - see activeGraphFilename's
+  // own comment for why this is the one moment the UI can capture it.
+  const handleGraphLoaded = useCallback(
+    async (name: string) => {
+      await refreshGraphFromServer(stageTypes);
+      setActiveGraphFilename(name);
+      setLoadStatus({ kind: "ok", message: "Loaded - click Reload to apply it." });
+    },
+    [refreshGraphFromServer, stageTypes],
+  );
 
   // Right-click node menu: Rename/Delete. Rename only ever touches
   // data.label (never data.type/id - those have to stay the real
@@ -539,106 +610,141 @@ function App() {
           width: 240,
           borderRight: "1px solid var(--border)",
           background: "var(--surface)",
-          padding: 16,
-          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          // The middle section (Stage types) is the only part that
+          // scrolls (flex: 1 + its own overflowY below) - the button
+          // block stays pinned at top and the graph-name footer stays
+          // pinned at bottom regardless of how many stage types or
+          // status messages are showing.
+          height: "100vh",
         }}
       >
-        <p className="card-title">Stage types</p>
-        {loadError && (
-          <p style={{ color: "var(--critical)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-            Couldn't load from the binary: {loadError}
-          </p>
-        )}
-        {stageTypes.map((stage) => (
-          <button
-            key={stage.name}
-            className="palette-btn"
-            onClick={() => addStageNode(stage)}
-            title={`${stage.in_types.join(", ")} -> ${stage.out_type}`}
-          >
-            {stage.name}
+        <div style={{ padding: 16, flexShrink: 0 }}>
+          <button className="btn" onClick={onNewGraph}>
+            New graph
           </button>
-        ))}
+          <button className="btn" style={{ marginTop: 8 }} onClick={onSave} disabled={!graphApiEnabled || saveStatus.kind === "saving"}>
+            {saveStatus.kind === "saving" ? "Saving..." : "Save graph"}
+          </button>
+          <button
+            className="btn"
+            style={{ marginTop: 8 }}
+            onClick={onSaveAs}
+            disabled={!graphApiEnabled || saveAsStatus.kind === "saving"}
+          >
+            {saveAsStatus.kind === "saving" ? "Saving..." : "Save As..."}
+          </button>
+          <button
+            className="btn"
+            style={{ marginTop: 8 }}
+            onClick={() => setShowGraphLibrary(true)}
+            disabled={!graphApiEnabled}
+          >
+            Manage graphs...
+          </button>
+          <button
+            className="btn"
+            style={{ marginTop: 8 }}
+            onClick={onReload}
+            disabled={!graphApiEnabled || reloadStatus.kind === "reloading"}
+            title="Gracefully restarts loomtabulator, applying whatever graph is currently saved"
+          >
+            {reloadStatus.kind === "reloading" ? "Reloading..." : "Reload"}
+          </button>
+          {!graphApiEnabled && (
+            <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>
+              Graph API not enabled on this binary (started without --web-port or the graph file
+              couldn't be read).
+            </p>
+          )}
+          {saveStatus.kind === "ok" && (
+            <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>
+              Saved. Click Reload to apply this graph - saving alone does not affect the currently
+              running pipeline.
+            </p>
+          )}
+          {saveStatus.kind === "error" && (
+            <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
+              {saveStatus.message}
+            </p>
+          )}
+          {saveAsStatus.kind === "ok" && (
+            <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>{saveAsStatus.message}</p>
+          )}
+          {saveAsStatus.kind === "error" && (
+            <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
+              {saveAsStatus.message}
+            </p>
+          )}
+          {reloadStatus.kind === "reloading" && (
+            <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>
+              Restarting loomtabulator and waiting for it to come back up...
+            </p>
+          )}
+          {reloadStatus.kind === "ok" && (
+            <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>
+              Reloaded - the new graph is now running.
+            </p>
+          )}
+          {reloadStatus.kind === "error" && (
+            <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
+              Reload failed: {reloadStatus.message}
+            </p>
+          )}
+          {loadStatus.kind === "ok" && (
+            <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>{loadStatus.message}</p>
+          )}
+          {configNotice && (
+            <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>{configNotice}</p>
+          )}
+        </div>
 
-        <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid var(--border)" }} />
+        <hr style={{ margin: 0, border: "none", borderTop: "1px solid var(--border)" }} />
 
-        <button className="btn" onClick={onNewGraph}>
-          New graph
-        </button>
-        <button className="btn" style={{ marginTop: 8 }} onClick={onSave} disabled={!graphApiEnabled || saveStatus.kind === "saving"}>
-          {saveStatus.kind === "saving" ? "Saving..." : "Save graph"}
-        </button>
-        <button
-          className="btn"
-          style={{ marginTop: 8 }}
-          onClick={onSaveAs}
-          disabled={!graphApiEnabled || saveAsStatus.kind === "saving"}
+        <div style={{ padding: 16, flex: 1, overflowY: "auto" }}>
+          <p className="card-title" style={{ marginTop: 0 }}>Stage types</p>
+          {loadError && (
+            <p style={{ color: "var(--critical)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+              Couldn't load from the binary: {loadError}
+            </p>
+          )}
+          {stageTypes.map((stage) => (
+            <button
+              key={stage.name}
+              className="palette-btn"
+              onClick={() => addStageNode(stage)}
+              title={`${stage.in_types.join(", ")} -> ${stage.out_type}`}
+            >
+              {stage.name}
+            </button>
+          ))}
+        </div>
+
+        {/* Prefers the real library filename (activeGraphFilename, only
+          * known once the user has explicitly Loaded or Save-As'd
+          * something - the backend never exposes what --graph=PATH
+          * itself was launched with) over graphName (the graph's own
+          * internal "name" JSON field, which has no required relation
+          * to any real filename - showing that alone was actively
+          * misleading, e.g. "v1-example-pipeline" for a graph opened
+          * from gfp_router_graph.json). */}
+        <div
+          style={{
+            flexShrink: 0,
+            padding: "10px 16px",
+            borderTop: "1px solid var(--border)",
+            fontSize: 11,
+            color: "var(--text-mute)",
+            fontFamily: "var(--font-mono)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={activeGraphFilename ?? graphName}
         >
-          {saveAsStatus.kind === "saving" ? "Saving..." : "Save As..."}
-        </button>
-        <button
-          className="btn"
-          style={{ marginTop: 8 }}
-          onClick={() => setShowGraphLibrary(true)}
-          disabled={!graphApiEnabled}
-        >
-          Manage graphs...
-        </button>
-        <button
-          className="btn"
-          style={{ marginTop: 8 }}
-          onClick={onReload}
-          disabled={!graphApiEnabled || reloadStatus.kind === "reloading"}
-          title="Gracefully restarts loomtabulator, applying whatever graph is currently saved"
-        >
-          {reloadStatus.kind === "reloading" ? "Reloading..." : "Reload"}
-        </button>
-        {!graphApiEnabled && (
-          <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>
-            Graph API not enabled on this binary (started without --web-port or the graph file
-            couldn't be read).
-          </p>
-        )}
-        {saveStatus.kind === "ok" && (
-          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>
-            Saved. Click Reload to apply this graph - saving alone does not affect the currently
-            running pipeline.
-          </p>
-        )}
-        {saveStatus.kind === "error" && (
-          <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
-            {saveStatus.message}
-          </p>
-        )}
-        {saveAsStatus.kind === "ok" && (
-          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>{saveAsStatus.message}</p>
-        )}
-        {saveAsStatus.kind === "error" && (
-          <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
-            {saveAsStatus.message}
-          </p>
-        )}
-        {reloadStatus.kind === "reloading" && (
-          <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>
-            Restarting loomtabulator and waiting for it to come back up...
-          </p>
-        )}
-        {reloadStatus.kind === "ok" && (
-          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>
-            Reloaded - the new graph is now running.
-          </p>
-        )}
-        {reloadStatus.kind === "error" && (
-          <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
-            Reload failed: {reloadStatus.message}
-          </p>
-        )}
-        {loadStatus.kind === "ok" && (
-          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>{loadStatus.message}</p>
-        )}
-        {configNotice && (
-          <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>{configNotice}</p>
-        )}
+          {activeGraphFilename ?? graphName}
+        </div>
       </aside>
       <main ref={reactFlowContainerRef} style={{ flex: 1, position: "relative" }}>
         <ReactFlow

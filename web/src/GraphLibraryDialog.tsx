@@ -6,7 +6,13 @@ interface GraphLibraryDialogProps {
   // Called after a successful Load, before the dialog closes itself -
   // App.tsx re-fetches GET /api/graph into the canvas here, the same
   // way it does on initial mount (see its own refreshGraphFromServer).
-  onLoaded: () => void | Promise<void>;
+  // Passed the library filename that was just loaded - the backend never
+  // exposes "what file is currently active" any other way (GET /api/graph
+  // serves content, not a path), so this is the one moment the UI
+  // actually learns a real filename, used to default Save As's own
+  // filename prompt sensibly instead of guessing from the graph's
+  // unrelated internal "name" JSON field.
+  onLoaded: (name: string) => void | Promise<void>;
 }
 
 // One consolidated "graph library" dialog covering Upload/Load/Delete,
@@ -63,7 +69,7 @@ export function GraphLibraryDialog({ onClose, onLoaded }: GraphLibraryDialogProp
         setError(result.error ?? "load failed");
         return;
       }
-      await onLoaded();
+      await onLoaded(name);
       onClose();
     },
     [onLoaded, onClose],
