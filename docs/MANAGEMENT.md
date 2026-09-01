@@ -211,7 +211,15 @@ the *previous* instance 1's hugepage segments. If instances 2..N are
 still running and attached at that moment, their mappings into those
 now-unlinked-and-reallocated segments are invalidated out from under
 them - substantially worse than Part 1's single-instance restart story,
-where nothing else was ever attached to begin with. **The supervisor
+where nothing else was ever attached to begin with. **Confirmed, not
+just predicted**: calling `POST /api/reload` on instance 1 while a
+secondary was still attached produced a real EAL panic mid-shutdown
+(`EAL: PANIC in eal_thread_wait_command(): cannot read on configuration
+pipe`), and the re-exec'd fresh instance then failed EAL init outright
+(`Cannot allocate memzone list`) - instance 1 was left completely down,
+not degraded. Graph state itself was unaffected (`POST /api/graph`
+already wrote it to disk beforehand, independent of the reload), but
+the process has to be relaunched by hand. **The supervisor
 must fully stop instances 2..N before restarting instance 1**, not
 after, and not concurrently. Restarting some instance K > 1 instead
 only requires stopping K+1..N first (K itself isn't the primary, so

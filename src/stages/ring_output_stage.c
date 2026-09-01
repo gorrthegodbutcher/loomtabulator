@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <errno.h>
 #include <rte_ring.h>
 #include <rte_malloc.h>
 #include <rte_eal.h>
@@ -51,6 +52,12 @@
 struct ring_output_config {
 	struct rte_ring *ring;
 
+	/* True only if THIS init() call is what created `ring` (rather than
+	 * attaching to one that already existed) - see init()'s own comment
+	 * for why this matters. Only the creator ever frees or drains it in
+	 * teardown() below. */
+	bool owns_ring;
+
 	/* This instance's own seq counter for records it produces - see
 	 * this file's header comment. Relaxed atomics: ordering across
 	 * concurrent producers doesn't matter, only that each gets a
@@ -77,17 +84,34 @@ ring_output_stage_init(const struct json_value *config)
 	if (st == NULL)
 		return NULL;
 
-	/* This side always creates (never looks up) - the downstream
-	 * instance's own ring_input.c is the side that looks up by name,
-	 * matching ring_input.h's existing "producer creates, consumer
-	 * attaches" convention. A name collision here (two ring_output
-	 * nodes configured with the same ring_name, in this graph or a
-	 * sibling one sharing this --file-prefix) is a real
-	 * misconfiguration, not something to silently paper over with a
-	 * lookup fallback - graph_config.c's own init()-returns-NULL ==
-	 * startup failure contract handles it the same way a bad path/
-	 * config value anywhere else does. */
+	/* Tries to create first - the normal case for a real, freshly
+	 * started instance. Falls back to rte_ring_lookup() ONLY on EEXIST,
+	 * which is not always a misconfiguration: graph_config_load() is
+	 * also run as a throwaway validate-then-teardown pass by
+	 * POST /api/graph, POST /api/graphs/load, and POST /api/probe-port-
+	 * count (see web_status.c) - every one of those calls this exact
+	 * init() for real, including while the ACTUAL running pipeline
+	 * already has its own ring_output node live on this same name. Without
+	 * this fallback, simply re-saving (or even just Configure-probing) a
+	 * graph containing an already-active ring_output node is impossible -
+	 * the throwaway pass's own rte_ring_create() collides with the real,
+	 * live one and fails every time. owns_ring tracks which case this
+	 * was, since only the side that actually created the ring may ever
+	 * free or drain it in teardown() below - a throwaway pass tearing
+	 * down a ring it merely looked up must leave the real, live one
+	 * completely untouched. This does mean two genuinely distinct
+	 * ring_output nodes accidentally sharing one name no longer fails
+	 * loudly at startup (they'll just both attach to the same ring,
+	 * which rte_ring's own multi-producer safety makes harmless, if not
+	 * necessarily intended) - accepted, since that's a much rarer
+	 * mistake than "the graph I'm re-saving already has a live one." */
 	st->ring = rte_ring_create(ring_name, ring_size, rte_socket_id(), 0);
+	if (st->ring != NULL) {
+		st->owns_ring = true;
+	} else if (rte_errno == EEXIST) {
+		st->ring = rte_ring_lookup(ring_name);
+		st->owns_ring = false;
+	}
 	if (st->ring == NULL) {
 		fprintf(stderr, "ring_output: rte_ring_create('%s') failed: %s\n",
 			ring_name, rte_strerror(rte_errno));
@@ -148,16 +172,32 @@ ring_output_stage_teardown(void *state)
 	if (cfg == NULL)
 		return;
 
-	/* Drain anything left unconsumed so its rte_malloc()'d blobs
-	 * don't leak - same posture main.c's own shutdown path already
-	 * takes for the input ring. Whether a downstream secondary is
-	 * still attached and mid-dequeue when this runs is exactly the
-	 * restart-ordering hazard docs/MANAGEMENT.md's Part 2 spec calls
-	 * out - this stage can't do anything about that itself, it can
-	 * only make sure ITS OWN shutdown doesn't leak memory. */
-	void *leftover = NULL;
-	while (rte_ring_dequeue(cfg->ring, &leftover) == 0)
-		rte_free(leftover);
+	/* Only the instance that actually created this ring (see init()'s
+	 * own comment) may drain or free it - a throwaway validation pass
+	 * that merely attached to an already-live ring via rte_ring_lookup()
+	 * must leave it completely alone: draining it here would steal real,
+	 * in-flight records out from under the actual running pipeline, and
+	 * freeing it would pull the ring out from under a downstream
+	 * secondary that's still attached to it. */
+	if (cfg->owns_ring) {
+		/* Drain anything left unconsumed so its rte_malloc()'d blobs
+		 * don't leak - same posture main.c's own shutdown path
+		 * already takes for the input ring. Whether a downstream
+		 * secondary is still attached and mid-dequeue when this runs
+		 * is exactly the restart-ordering hazard docs/MANAGEMENT.md's
+		 * Part 2 spec calls out - this stage can't do anything about
+		 * that itself, it can only make sure ITS OWN shutdown doesn't
+		 * leak memory. */
+		void *leftover = NULL;
+		while (rte_ring_dequeue(cfg->ring, &leftover) == 0)
+			rte_free(leftover);
+
+		/* Releases the ring's own name/memzone registration so a
+		 * later instance reusing this ring_name (a restart of this
+		 * same process, or a completely different graph) doesn't hit
+		 * the EEXIST path in init() above unnecessarily. */
+		rte_ring_free(cfg->ring);
+	}
 
 	free(cfg);
 }
