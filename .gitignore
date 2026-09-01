@@ -1,6 +1,7 @@
 src/build/
 src/compile_commands.json
 /plugins/
+/graphs/
 
 # User's own local graph config, not a checked-in example.
 /testdata/gfp_router_graph.json

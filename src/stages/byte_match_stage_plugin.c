@@ -1,0 +1,27 @@
+/* Plugin ABI shim for the built-in "byte_match" stage - see
+ * validate_stage_plugin.c's own header comment for the general shape
+ * every one of these shims follows. */
+#include "byte_match_stage.h"
+#include "../stage_abi.h"
+
+static const struct stage g_stage = {
+	.name = "byte_match",
+	.in_types = PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD),
+	.out_type = PORT_TYPE_RAW_RECORD,
+	.init = byte_match_stage_init,
+	.process = byte_match_stage_process,
+	.teardown = byte_match_stage_teardown,
+	.get_status = byte_match_stage_get_status,
+};
+
+uint32_t
+loom_stage_abi_version(void)
+{
+	return STAGE_ABI_VERSION;
+}
+
+const struct stage *
+loom_stage_entry(void)
+{
+	return &g_stage;
+}

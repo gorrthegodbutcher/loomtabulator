@@ -462,6 +462,106 @@ export async function waitForReload(timeoutMs = 15000, intervalMs = 300): Promis
   return false;
 }
 
+// One entry in the graph library (src/web_status.c's GET /api/graphs) -
+// distinct from GraphMeta/FetchedGraph above, which describe the one
+// currently *active* graph, not this directory listing.
+export interface StoredGraph {
+  name: string;
+  mtime: number; // unix seconds - src/web_status.c's stat().st_mtime
+}
+
+/* GET /api/graphs - the named graphs sitting in --graphs-dir, sorted by
+ * name (same order the server already returns). Never throws - an empty
+ * list is indistinguishable from "the fetch failed," which is fine here
+ * since the only caller (GraphLibraryDialog.tsx) just renders whatever
+ * comes back and lets the user retry via the dialog's own reopen. */
+export async function listStoredGraphs(): Promise<StoredGraph[]> {
+  try {
+    const res = await fetch("/api/graphs", { cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+/* POST /api/graphs?name=X - validates jsonText exactly as saveGraph()'s
+ * POST /api/graph does, and on success adds it to the library as `name`
+ * (creates or overwrites). Does NOT touch the active graph - see
+ * web_status.h's header comment on struct web_graph_ctx.graphs_dir. */
+export async function uploadGraph(
+  name: string,
+  jsonText: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/graphs?name=${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: jsonText,
+    });
+    let json: { ok?: boolean; error?: string } = {};
+    try {
+      json = await res.json();
+    } catch {
+      /* non-JSON response - fall through to the res.ok-based error below */
+    }
+    if (!res.ok || json.ok !== true) {
+      return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/* POST /api/graphs/load?name=X - (re-)validates a library graph and
+ * activates it (same "writes to --graph=PATH, restart_required: true"
+ * effect saveGraph() has). The caller (GraphLibraryDialog.tsx, via
+ * App.tsx's onLoaded prop) is responsible for re-fetching /api/graph
+ * afterward so the canvas reflects the newly-active graph. */
+export async function loadStoredGraph(name: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/graphs/load?name=${encodeURIComponent(name)}`, {
+      method: "POST",
+    });
+    let json: { ok?: boolean; error?: string } = {};
+    try {
+      json = await res.json();
+    } catch {
+      /* non-JSON response - fall through to the res.ok-based error below */
+    }
+    if (!res.ok || json.ok !== true) {
+      return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/* DELETE /api/graphs?name=X - removes one graph from the library. Never
+ * touches the active graph, even if that graph happens to be the one
+ * being deleted here - see web_status.h's header comment. */
+export async function deleteStoredGraph(name: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/graphs?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+    let json: { ok?: boolean; error?: string } = {};
+    try {
+      json = await res.json();
+    } catch {
+      /* non-JSON response - fall through to the res.ok-based error below */
+    }
+    if (!res.ok || json.ok !== true) {
+      return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
 /* GET /api/stage-status (src/web_status.c's handle_stage_status()) -
  * every node's current struct stage.get_status() snapshot, keyed by
  * node_id for O(1) lookup against the graph's own node ids. Called on

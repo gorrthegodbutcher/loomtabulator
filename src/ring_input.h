@@ -3,16 +3,26 @@
 
 #include <rte_ring.h>
 
-/* Creates the input rte_ring - single-producer/multi-consumer as of
- * Phase 2 (testgen.c's pthread remains the sole producer, but N pipeline
- * worker lcores now dequeue competitively from it - see
- * pipeline_worker.c and epoch_barrier.h for the ordering guarantee this
- * depends on: rte_ring preserves overall FIFO order across all consumers
- * combined). Phase 4 replaces this with rte_ring_lookup() against a ring
- * a separate chrontabulator process created (DPDK multi-process,
- * secondary process attaching to primary-owned shared memory) instead
- * of creating one locally - kept as this one choke-point function so
- * that change touches a single call site, not every caller. Returns
+/* Finds or creates the input rte_ring - rte_ring_lookup() first (in
+ * case a ring under this exact name already exists in this instance's
+ * --file-prefix namespace, created by a DIFFERENT, upstream process's
+ * ring_output stage - see ring_output_stage.c and docs/MANAGEMENT.md's
+ * Part 2), falling back to rte_ring_create() otherwise - the ordinary
+ * single-process case (testgen.c is the sole producer today; Phase 4
+ * makes a real chrontabulator process the producer instead, attaching
+ * as a DPDK secondary the same way an upstream ring_output's downstream
+ * consumer does). Single-producer/multi-consumer when THIS function
+ * creates it (RING_F_SP_ENQ) - N pipeline worker lcores dequeue
+ * competitively either way (see pipeline_worker.c and epoch_barrier.h
+ * for the ordering guarantee that depends on: rte_ring preserves
+ * overall FIFO order across all consumers combined) - but a ring found
+ * via lookup keeps whatever flags ITS creator gave it (ring_output's
+ * own ring is created multi-producer, since a daisy chain's upstream
+ * process can have more than one worker lcore reaching that node
+ * concurrently); lookup returns the same ring object regardless, so
+ * this function's own dequeue-side callers don't need to know or care
+ * which case they're in. Kept as this one choke-point function so
+ * either path touches a single call site, not every caller. Returns
  * NULL on failure (check rte_errno, same convention as every other
  * rte_ring_create() caller).
  *

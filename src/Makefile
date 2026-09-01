@@ -53,7 +53,8 @@ PLUGINS_DIR := ../plugins
 plugins: $(PLUGINS_DIR)/validate.so $(PLUGINS_DIR)/extract.so \
 	 $(PLUGINS_DIR)/convert.so $(PLUGINS_DIR)/forward_udp.so \
 	 $(PLUGINS_DIR)/dump_binary.so $(PLUGINS_DIR)/dump_text.so \
-	 $(PLUGINS_DIR)/null_sink.so
+	 $(PLUGINS_DIR)/null_sink.so $(PLUGINS_DIR)/ring_output.so \
+	 $(PLUGINS_DIR)/byte_match.so
 
 $(PLUGINS_DIR):
 	@mkdir -p $@
@@ -72,6 +73,20 @@ $(PLUGINS_DIR)/dump_text.so: stages/dump_text_stage.c stages/dump_text_stage_plu
 	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
 $(PLUGINS_DIR)/null_sink.so: stages/null_sink_stage.c stages/null_sink_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
 	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
+$(PLUGINS_DIR)/byte_match.so: stages/byte_match_stage.c stages/byte_match_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
+	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
+
+# ring_output is the one exception to "a stage plugin doesn't need DPDK
+# installed to build" above - it genuinely produces an rte_ring, so it
+# needs libdpdk's cflags/libs same as the main binary itself (see
+# ring_output_stage.c's own header comment). Built with $(CFLAGS)/
+# $(LDFLAGS_SHARED), not $(PLUGIN_CFLAGS) - still -shared like every
+# other plugin (with an explicit -fPIC $(CFLAGS) doesn't carry, since
+# the main binary it's normally used for is an executable, not a
+# shared object), still loaded through the exact same dlopen()
+# mechanism, just linked against libdpdk like main.c is.
+$(PLUGINS_DIR)/ring_output.so: stages/ring_output_stage.c stages/ring_output_stage_plugin.c json.c Makefile $(PC_FILE) | $(PLUGINS_DIR)
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ $(filter %.c,$^) $(LDFLAGS_SHARED)
 
 # What a third-party plugin developer vendors into their own repo - see
 # plugin-sdk/README.md. These 4 files are copies of this same repo's own

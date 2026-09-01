@@ -21,7 +21,15 @@
  * and reports its out_port_count() - the web UI's only way to know how
  * many handles a multi-port node needs, since that's an instance
  * property, not something GET /api/stage-types' per-type listing can
- * answer). CLAUDE.md's Phase 3 design sketch flagged live-reload-vs-
+ * answer). GET /api/graphs (list the named graphs in --graphs-dir),
+ * POST /api/graphs?name=X (validate and add one to that directory,
+ * without touching the active graph), POST /api/graphs/load?name=X
+ * (validate one already in that directory and activate it - same
+ * "writes to graph_path, restart_required: true" effect POST /api/graph
+ * has), and DELETE /api/graphs?name=X (remove one from that directory)
+ * round out a small library of graphs to switch between, on top of the
+ * single active graph_path/current_graph_json above. CLAUDE.md's Phase 3
+ * design sketch flagged live-reload-vs-
  * restart as an open decision; this resolves it in favor of restart,
  * deliberately - hot-swapping the running pipeline_chain would mean
  * sharing it with epoch_barrier.c's worker-pool synchronization, which
@@ -77,11 +85,21 @@ struct app_web_status {
  * Not const: current_graph_json is mutated in place (old copy freed,
  * replaced) each time a save succeeds. Pass a NULL ctx pointer to
  * web_status_start() to disable both routes entirely (501) - e.g. for a
- * future test harness that doesn't care about the graph API. */
+ * future test harness that doesn't care about the graph API.
+ *
+ * graphs_dir rounds this out with the *library* of named graphs (see
+ * GET/POST /api/graphs, POST /api/graphs/load, DELETE /api/graphs) - a
+ * directory of standalone .json files, distinct from graph_path/
+ * current_graph_json above (which always describe the single *active*
+ * graph). Loading one from the library copies its bytes into graph_path
+ * exactly the way POST /api/graph already does; the library itself is
+ * otherwise untouched by activation. Not copied - must outlive the
+ * server, same contract as graph_path. */
 struct web_graph_ctx {
 	const char *graph_path;     /* not copied - must outlive the server */
 	char *current_graph_json;   /* malloc'd; web_status.c owns mutating it */
 	size_t current_graph_len;
+	const char *graphs_dir;     /* not copied - must outlive the server */
 };
 
 void app_web_status_init(struct app_web_status *status);
