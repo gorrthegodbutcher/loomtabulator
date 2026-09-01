@@ -85,6 +85,24 @@ function App() {
   const [stageStatuses, setStageStatuses] = useState<Record<string, StageStatusEntry>>({});
   const [statusPanelCollapsed, setStatusPanelCollapsed] = useState(false);
   const graphMeta = useRef<GraphMeta>(DEFAULT_META);
+  // Captured via <ReactFlow>'s onInit below - lets addStageNode() place a
+  // newly-added node at the CURRENT viewport's center (screenToFlowPosition
+  // converts screen/client pixels to flow coordinates, accounting for
+  // whatever pan/zoom the canvas is currently at) instead of a fixed
+  // canvas-coordinate grid, which could land anywhere relative to what's
+  // actually visible - including well outside the viewport entirely, the
+  // "new node shows up off-screen" bug this fixes. reactFlowContainerRef
+  // gives the container's own on-screen bounding rect so "the center" can
+  // be computed as real screen pixels in the first place.
+  // Only the one method addStageNode() actually needs - narrowed
+  // deliberately rather than the full ReactFlowInstance<NodeType, EdgeType>
+  // type, whose other methods (setNodes() in particular) are contravariant
+  // in NodeType and fight any generic instantiation that isn't an exact
+  // structural match to what <ReactFlow nodes={...}> was actually given.
+  const reactFlowInstance = useRef<{
+    screenToFlowPosition: (pos: { x: number; y: number }) => { x: number; y: number };
+  } | null>(null);
+  const reactFlowContainerRef = useRef<HTMLElement>(null);
   const [graphApiEnabled, setGraphApiEnabled] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null);
   const [configEditor, setConfigEditor] = useState<{ nodeId: string; text: string; error: string | null } | null>(
@@ -178,15 +196,43 @@ function App() {
     [nodes, edges],
   );
 
+  // Where a newly-added node should land: the CURRENT viewport's center,
+  // in flow coordinates - screenToFlowPosition() accounts for whatever
+  // pan/zoom the canvas is at, so this is always on-screen regardless of
+  // where the user has scrolled to, unlike a fixed canvas-coordinate
+  // origin (the old behavior, which could - and did - place a new node
+  // well outside the visible viewport). Falls back to a fixed point only
+  // if the canvas hasn't finished mounting yet (onInit hasn't fired) -
+  // shouldn't normally happen, since the palette isn't clickable before
+  // the canvas itself renders, but keeps this total rather than throwing.
+  const viewportCenterPosition = useCallback((): { x: number; y: number } => {
+    const instance = reactFlowInstance.current;
+    const container = reactFlowContainerRef.current;
+    if (instance == null || container == null) {
+      return { x: 80, y: 80 };
+    }
+    const rect = container.getBoundingClientRect();
+    return instance.screenToFlowPosition({
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    });
+  }, []);
+
   const addStageNode = useCallback(async (stage: StageType) => {
     const id = `new-${nextNewNodeId++}`;
     const outPortCount = await probePortCount(stage.name, {});
+    const center = viewportCenterPosition();
     setNodes((nds) => [
       ...nds,
       {
         id,
         type: "stage",
-        position: { x: 80 + (nds.length % 5) * 180, y: 80 + Math.floor(nds.length / 5) * 120 },
+        // Small stagger (a short diagonal cascade, wrapping every 6
+        // nodes) so several added in quick succession don't land exactly
+        // on top of each other and become impossible to tell apart or
+        // click individually - still centered on the viewport, not a
+        // fixed canvas origin.
+        position: { x: center.x - 80 + (nds.length % 6) * 24, y: center.y - 40 + (nds.length % 6) * 24 },
         style: STAGE_NODE_STYLE,
         data: {
           label: `${stage.name} (${id})`,
@@ -201,7 +247,7 @@ function App() {
         },
       },
     ]);
-  }, []);
+  }, [viewportCenterPosition]);
 
   const onSave = useCallback(async () => {
     setSaveStatus({ kind: "saving" });
@@ -560,11 +606,14 @@ function App() {
           <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 8 }}>{configNotice}</p>
         )}
       </aside>
-      <main style={{ flex: 1, position: "relative" }}>
+      <main ref={reactFlowContainerRef} style={{ flex: 1, position: "relative" }}>
         <ReactFlow
           nodes={nodesWithTargetColor}
           edges={coloredEdges}
           nodeTypes={NODE_TYPES}
+          onInit={(instance) => {
+            reactFlowInstance.current = instance;
+          }}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
