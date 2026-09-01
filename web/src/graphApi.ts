@@ -336,10 +336,24 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
    * schema requires exactly one, per graph_config.c's own validation,
    * for any graph that ever successfully loaded in the first place). */
   const firstNode = nodes.find((n) => !edges.some((e) => e.target === n.id));
-  const ringNode = makeRingInputNode(
-    (firstNode?.position.x ?? 0) - 220,
-    firstNode?.position.y ?? 100,
-  );
+
+  // A user-placed position for the ring-input node, round-tripped through
+  // input.position by buildRawGraph() below - graph_config.c never reads
+  // this key (only ring_name/ring_size/record_type), same "extra key the
+  // backend silently ignores" pattern data.label/position already use for
+  // real nodes (see StageNodeData's own comment). Falls back to the old
+  // "220px left of the first node" placement only when no saved position
+  // exists yet (a graph saved before this existed, or a brand-new one) -
+  // without this, the ring-input node used to snap back to that computed
+  // spot on every reload regardless of where it had been dragged to.
+  const savedPosition = raw.input?.position;
+  const ringNode =
+    savedPosition != null &&
+    typeof savedPosition === "object" &&
+    typeof (savedPosition as { x?: unknown }).x === "number" &&
+    typeof (savedPosition as { y?: unknown }).y === "number"
+      ? makeRingInputNode((savedPosition as { x: number }).x, (savedPosition as { y: number }).y)
+      : makeRingInputNode((firstNode?.position.x ?? 0) - 220, firstNode?.position.y ?? 100);
   const ringEdge: Edge[] = firstNode
     ? [{ id: RING_INPUT_EDGE_ID, source: RING_INPUT_NODE_ID, target: firstNode.id }]
     : [];
@@ -364,7 +378,14 @@ function buildRawGraph(meta: GraphMeta, nodes: Node<StageNodeData>[], edges: Edg
   /* The ring-input node (see makeRingInputNode() above) is purely a
    * canvas affordance - graph_config.c has no stage type for it and
    * would reject it as "unknown stage type", so it - and whatever edge
-   * connects it to the real first stage - never leaves the browser. */
+   * connects it to the real first stage - never leaves the browser. Its
+   * POSITION does leave the browser, though - see fetchGraph()'s own
+   * comment on why input.position exists and how it's read back. */
+  const ringInputNode = nodes.find((n) => n.id === RING_INPUT_NODE_ID);
+  const input = ringInputNode
+    ? { ...meta.input, position: { x: ringInputNode.position.x, y: ringInputNode.position.y } }
+    : meta.input;
+
   const realNodes = nodes.filter((n) => n.id !== RING_INPUT_NODE_ID);
   const realEdges = edges.filter(
     (e) => e.source !== RING_INPUT_NODE_ID && e.target !== RING_INPUT_NODE_ID,
@@ -373,7 +394,7 @@ function buildRawGraph(meta: GraphMeta, nodes: Node<StageNodeData>[], edges: Edg
   return {
     loomtabulator_graph_version: meta.loomtabulator_graph_version,
     name: meta.name,
-    input: meta.input,
+    input,
     nodes: realNodes.map((n) => ({
       id: n.id,
       type: n.data.type,
