@@ -19,6 +19,7 @@ import { fetchStageTypes, type StageType } from "./stageTypes";
 import {
   fetchGraph,
   saveGraph,
+  saveGraphAs,
   reloadGraph,
   waitForReload,
   fetchStageStatuses,
@@ -67,6 +68,9 @@ function App() {
   const [saveStatus, setSaveStatus] = useState<{ kind: "idle" | "saving" | "ok" | "error"; message?: string }>({
     kind: "idle",
   });
+  const [saveAsStatus, setSaveAsStatus] = useState<
+    { kind: "idle" | "saving" | "ok" | "error"; message?: string }
+  >({ kind: "idle" });
   const [reloadStatus, setReloadStatus] = useState<
     { kind: "idle" | "reloading" | "ok" | "error"; message?: string }
   >({ kind: "idle" });
@@ -204,6 +208,43 @@ function App() {
     const result = await saveGraph(graphMeta.current, nodes, edges);
     setSaveStatus(result.ok ? { kind: "ok" } : { kind: "error", message: result.error });
   }, [nodes, edges]);
+
+  // Save As: prompts for a filename (forcing ".json", same convention
+  // GraphLibraryDialog's own Upload uses for a dropped-in file without
+  // one), then uploads the current canvas into the graph library under
+  // that name via saveGraphAs() - library only, doesn't touch the
+  // active graph (same posture Upload already has; Load afterward makes
+  // it active). window.prompt(), same simple-text-input convention
+  // handleRename already uses below, rather than a bespoke dialog.
+  const onSaveAs = useCallback(async () => {
+    const suggested = graphMeta.current.name ? `${graphMeta.current.name}.json` : "graph.json";
+    const raw = window.prompt("Save as (filename)", suggested);
+    if (!raw) return; // cancelled, or an empty name
+    const name = raw.endsWith(".json") ? raw : `${raw}.json`;
+
+    setSaveAsStatus({ kind: "saving" });
+    const result = await saveGraphAs(name, graphMeta.current, nodes, edges);
+    setSaveAsStatus(
+      result.ok
+        ? { kind: "ok", message: `Saved as "${name}" in the library.` }
+        : { kind: "error", message: result.error },
+    );
+  }, [nodes, edges]);
+
+  // New Graph: resets the canvas to a blank one (client-side only, no
+  // server call - nothing is persisted until Save/Save As). Confirms
+  // first if there's anything beyond the synthetic ring-input node to
+  // actually lose, same guard Delete-in-library already uses.
+  const onNewGraph = useCallback(() => {
+    if (nodes.length > 1 && !window.confirm("Start a new graph? Unsaved changes will be lost.")) {
+      return;
+    }
+    graphMeta.current = { ...DEFAULT_META, input: { ...DEFAULT_META.input } };
+    setNodes([makeRingInputNode(40, 100)]);
+    setEdges([]);
+    setSaveStatus({ kind: "idle" });
+    setSaveAsStatus({ kind: "idle" });
+  }, [nodes.length]);
 
   // Reload: POSTs /api/reload (main.c gracefully shuts down and
   // re-exec's itself - see graphApi.ts's own comment), then polls until
@@ -441,8 +482,19 @@ function App() {
 
         <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid var(--border)" }} />
 
-        <button className="btn" onClick={onSave} disabled={!graphApiEnabled || saveStatus.kind === "saving"}>
+        <button className="btn" onClick={onNewGraph}>
+          New graph
+        </button>
+        <button className="btn" style={{ marginTop: 8 }} onClick={onSave} disabled={!graphApiEnabled || saveStatus.kind === "saving"}>
           {saveStatus.kind === "saving" ? "Saving..." : "Save graph"}
+        </button>
+        <button
+          className="btn"
+          style={{ marginTop: 8 }}
+          onClick={onSaveAs}
+          disabled={!graphApiEnabled || saveAsStatus.kind === "saving"}
+        >
+          {saveAsStatus.kind === "saving" ? "Saving..." : "Save As..."}
         </button>
         <button
           className="btn"
@@ -476,6 +528,14 @@ function App() {
         {saveStatus.kind === "error" && (
           <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
             {saveStatus.message}
+          </p>
+        )}
+        {saveAsStatus.kind === "ok" && (
+          <p style={{ fontSize: 11, color: "var(--good)", marginTop: 8 }}>{saveAsStatus.message}</p>
+        )}
+        {saveAsStatus.kind === "error" && (
+          <p style={{ fontSize: 11, color: "var(--critical)", marginTop: 8, fontFamily: "var(--font-mono)" }}>
+            {saveAsStatus.message}
           </p>
         )}
         {reloadStatus.kind === "reloading" && (
@@ -606,10 +666,11 @@ function App() {
             </p>
             <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: -8 }}>
               {configEditor.nodeId === RING_INPUT_NODE_ID
-                ? "Raw JSON - the graph's top-level \"input\" (ring_name/ring_size/record_type). Not " +
-                  "validated until Save - graph_config_load() checks it server-side, same as any stage's config."
-                : "Raw JSON - this stage's config shape isn't known to the UI. Saving re-checks how many " +
-                  "output ports this stage has and redraws its handles."}
+                ? "Raw JSON - the graph's top-level \"input\" (ring_name/ring_size/record_type). OK only " +
+                  "applies it to the canvas - nothing is written to disk until you hit Save/Save As."
+                : "Raw JSON - this stage's config shape isn't known to the UI. OK re-checks how many output " +
+                  "ports this stage has and redraws its handles, but only applies it to the canvas - nothing " +
+                  "is written to disk until you hit Save/Save As."}
             </p>
             <textarea
               value={configEditor.text}
@@ -638,7 +699,7 @@ function App() {
                 Cancel
               </button>
               <button className="btn" onClick={handleSaveConfig}>
-                Save
+                OK
               </button>
             </div>
           </div>

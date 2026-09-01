@@ -355,11 +355,12 @@ export async function fetchGraph(stageTypes: StageType[]): Promise<FetchedGraph 
   };
 }
 
-export async function saveGraph(
-  meta: GraphMeta,
-  nodes: Node<StageNodeData>[],
-  edges: Edge[],
-): Promise<{ ok: boolean; error?: string }> {
+/* Builds the RawGraph JSON this backend actually understands out of the
+ * canvas's own React Flow state - shared by saveGraph() (POSTs it to
+ * the active graph) and saveGraphAs() below (POSTs it into the library
+ * under a new name instead) so "what the canvas currently looks like"
+ * has exactly one serialization, used either way. */
+function buildRawGraph(meta: GraphMeta, nodes: Node<StageNodeData>[], edges: Edge[]): RawGraph {
   /* The ring-input node (see makeRingInputNode() above) is purely a
    * canvas affordance - graph_config.c has no stage type for it and
    * would reject it as "unknown stage type", so it - and whatever edge
@@ -369,7 +370,7 @@ export async function saveGraph(
     (e) => e.source !== RING_INPUT_NODE_ID && e.target !== RING_INPUT_NODE_ID,
   );
 
-  const body: RawGraph = {
+  return {
     loomtabulator_graph_version: meta.loomtabulator_graph_version,
     name: meta.name,
     input: meta.input,
@@ -396,11 +397,17 @@ export async function saveGraph(
       };
     }),
   };
+}
 
+export async function saveGraph(
+  meta: GraphMeta,
+  nodes: Node<StageNodeData>[],
+  edges: Edge[],
+): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch("/api/graph", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(buildRawGraph(meta, nodes, edges)),
   });
 
   let json: { ok?: boolean; error?: string } = {};
@@ -415,6 +422,21 @@ export async function saveGraph(
     return { ok: false, error: json.error ?? `HTTP ${res.status}` };
   }
   return { ok: true };
+}
+
+/* "Save As": same canvas serialization as saveGraph() above, but into
+ * the graph library under `name` (via uploadGraph()'s POST /api/graphs)
+ * rather than overwriting the active graph - same "library only, not
+ * activated" posture GraphLibraryDialog's own Upload already has. Use
+ * Load afterward to make it the active graph, same two-step flow
+ * uploading a file from disk already requires. */
+export async function saveGraphAs(
+  name: string,
+  meta: GraphMeta,
+  nodes: Node<StageNodeData>[],
+  edges: Edge[],
+): Promise<{ ok: boolean; error?: string }> {
+  return uploadGraph(name, JSON.stringify(buildRawGraph(meta, nodes, edges)));
 }
 
 /* POST /api/reload (src/web_status.c's handle_post_reload()) - triggers
