@@ -13,6 +13,7 @@ import {
   type EdgeChange,
   type Node,
   type NodeMouseHandler,
+  useNodesInitialized,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { fetchStageTypes, type StageType } from "./stageTypes";
@@ -94,13 +95,15 @@ function App() {
   // "new node shows up off-screen" bug this fixes. reactFlowContainerRef
   // gives the container's own on-screen bounding rect so "the center" can
   // be computed as real screen pixels in the first place.
-  // Only the one method addStageNode() actually needs - narrowed
-  // deliberately rather than the full ReactFlowInstance<NodeType, EdgeType>
-  // type, whose other methods (setNodes() in particular) are contravariant
-  // in NodeType and fight any generic instantiation that isn't an exact
-  // structural match to what <ReactFlow nodes={...}> was actually given.
+  // Only the methods addStageNode()/the fitView effect below actually
+  // need - narrowed deliberately rather than the full
+  // ReactFlowInstance<NodeType, EdgeType> type, whose other methods
+  // (setNodes() in particular) are contravariant in NodeType and fight
+  // any generic instantiation that isn't an exact structural match to
+  // what <ReactFlow nodes={...}> was actually given.
   const reactFlowInstance = useRef<{
     screenToFlowPosition: (pos: { x: number; y: number }) => { x: number; y: number };
+    fitView: (options?: { padding?: number; duration?: number }) => void;
   } | null>(null);
   const reactFlowContainerRef = useRef<HTMLElement>(null);
   const [graphApiEnabled, setGraphApiEnabled] = useState(true);
@@ -109,6 +112,20 @@ function App() {
     null,
   );
   const [configNotice, setConfigNotice] = useState<string | null>(null);
+  // Set by refreshGraphFromServer() whenever it actually loads a graph
+  // (startup, or a GraphLibraryDialog Load), consumed by onNodesInitialized
+  // below (see <ReactFlow>'s own prop) - fitView() needs every node's real
+  // DOM dimensions measured first, which happens asynchronously after
+  // React commits new nodes into the DOM, so firing it right after
+  // setNodes() (even from a useEffect) can still race React Flow's own
+  // internal measurement pass and fit bounds around only whichever nodes
+  // happened to be measured yet. onNodesInitialized is React Flow's own
+  // "every current node is now measured" signal - the one point it's
+  // actually safe to call fitView() and get correct bounds for the WHOLE
+  // graph, not just whatever was ready first. A plain ref (not state) -
+  // this is consumed inside a callback, not rendered, so it doesn't need
+  // to trigger a re-render itself.
+  const pendingFitView = useRef(false);
 
   // Fetches GET /api/graph and populates the canvas from it - shared by
   // the mount-time effect below and by handleGraphLoaded (called after
@@ -123,6 +140,7 @@ function App() {
     graphMeta.current = graph.meta;
     setNodes(graph.nodes);
     setEdges(graph.edges);
+    pendingFitView.current = true;
     // A loaded graph can already contain "new-N" ids from an earlier UI
     // session (nextNewNodeId is module-level state, reset to 1 on every
     // fresh page load) - without this, the next addStageNode() call
@@ -144,6 +162,22 @@ function App() {
       })
       .catch((err) => setLoadError(String(err)));
   }, [refreshGraphFromServer]);
+
+  // True exactly when every CURRENT node has been measured (has a real
+  // DOM width/height) - see pendingFitView's own comment for why this,
+  // not a useEffect timed off the state update itself, is the actual
+  // signal fitView() needs to wait for to compute correct bounds for the
+  // whole graph rather than just whichever nodes happened to be measured
+  // first. Requires App to be a descendant of <ReactFlowProvider> (see
+  // main.tsx) - unlike reactFlowInstance's onInit-based ref above, this
+  // one really does need the hook.
+  const nodesInitialized = useNodesInitialized();
+  useEffect(() => {
+    if (nodesInitialized && pendingFitView.current) {
+      pendingFitView.current = false;
+      reactFlowInstance.current?.fitView({ padding: 0.2, duration: 200 });
+    }
+  }, [nodesInitialized]);
 
   // Live per-stage status (GET /api/stage-status, ABI v6's struct
   // stage.get_status()) - polled on a fixed client-side interval,
