@@ -1,0 +1,23 @@
+{
+  "loomtabulator_graph_version": 1,
+  "name": "byte-match-example",
+  "input": { "ring_name": "LOOM_INPUT_RING", "ring_size": 4096 },
+  "nodes": [
+    { "id": "n1", "type": "validate", "data": { "config": {} } },
+    {
+      "id": "n2",
+      "type": "byte_match",
+      "data": {
+        "config": { "magic": "2A", "offset": 39 },
+        "label": "counter low byte == 0x2A?"
+      }
+    },
+    { "id": "n3", "type": "null_sink", "data": { "config": {}, "label": "matched" } },
+    { "id": "n4", "type": "null_sink", "data": { "config": {}, "label": "unmatched (flagged)" } }
+  ],
+  "edges": [
+    { "source": "n1", "target": "n2" },
+    { "source": "n2", "target": "n3" },
+    { "source": "n2", "target": "n4", "invalid_target": true }
+  ]
+}

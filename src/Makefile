@@ -53,7 +53,8 @@ PLUGINS_DIR := ../plugins
 plugins: $(PLUGINS_DIR)/validate.so $(PLUGINS_DIR)/extract.so \
 	 $(PLUGINS_DIR)/convert.so $(PLUGINS_DIR)/forward_udp.so \
 	 $(PLUGINS_DIR)/dump_binary.so $(PLUGINS_DIR)/dump_text.so \
-	 $(PLUGINS_DIR)/null_sink.so $(PLUGINS_DIR)/ring_output.so
+	 $(PLUGINS_DIR)/null_sink.so $(PLUGINS_DIR)/ring_output.so \
+	 $(PLUGINS_DIR)/byte_match.so
 
 $(PLUGINS_DIR):
 	@mkdir -p $@
@@ -71,6 +72,8 @@ $(PLUGINS_DIR)/dump_binary.so: stages/dump_binary_stage.c stages/dump_binary_sta
 $(PLUGINS_DIR)/dump_text.so: stages/dump_text_stage.c stages/dump_text_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
 	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
 $(PLUGINS_DIR)/null_sink.so: stages/null_sink_stage.c stages/null_sink_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
+	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
+$(PLUGINS_DIR)/byte_match.so: stages/byte_match_stage.c stages/byte_match_stage_plugin.c json.c Makefile | $(PLUGINS_DIR)
 	$(CC) $(PLUGIN_CFLAGS) -shared -o $@ $(filter %.c,$^)
 
 # ring_output is the one exception to "a stage plugin doesn't need DPDK
