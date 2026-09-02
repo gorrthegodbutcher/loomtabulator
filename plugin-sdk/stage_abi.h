@@ -5,9 +5,9 @@
 #include "stage.h"
 
 /* The plugin ABI contract - see src/plugin_loader.c's header comment
- * for the full loading protocol. A plugin is a .so exporting exactly
- * two module-level functions, called once each at load time, in this
- * order:
+ * for the full loading protocol. An ordinary, single-stage plugin is a
+ * .so exporting exactly two module-level functions, called once each at
+ * load time, in this order:
  *
  *   uint32_t loom_stage_abi_version(void);
  *       Must return STAGE_ABI_VERSION below. Checked BEFORE anything
@@ -23,7 +23,36 @@
  *       function pointers (see stage.h). NULL is a valid "reject me"
  *       response.
  *
- * These two exports are NOT the whole lifecycle - struct stage's own
+ * A "loomlet" - this project's own term for a .so bundling more than
+ * one stage type together (a family of related stages sharing common
+ * code, built and shipped as one plugin instead of one .so per stage
+ * type) - exports a THIRD, mutually-exclusive-with-loom_stage_entry
+ * function instead:
+ *
+ *   const struct stage *loom_stage_entry_at(unsigned index);
+ *       Called with index = 0, 1, 2, ... in order until it returns
+ *       NULL, which ends the sequence (a plugin returning NULL for
+ *       index 0 declares itself a loomlet with zero stages - logged
+ *       and skipped, not fatal, same posture an ordinary plugin's own
+ *       NULL loom_stage_entry() already has). Each non-NULL return is
+ *       registered exactly like a single-stage plugin's one stage
+ *       would be - same per-stage name-collision and registry-size
+ *       checks, same log line per stage. plugin_loader.c checks (via
+ *       dlsym()) whether a .so exports loom_stage_entry_at BEFORE ever
+ *       looking for loom_stage_entry - an ordinary single-stage plugin
+ *       simply doesn't export this symbol at all, so it takes the
+ *       original single-stage path completely unchanged; a loomlet
+ *       does not need to ALSO export loom_stage_entry - implement
+ *       exactly one of the two, never both.
+ *
+ * Deliberately NOT a STAGE_ABI_VERSION bump: this extends the loading
+ * PROTOCOL (which two/three symbols a .so exports and how they're
+ * called), not the layout or meaning of struct stage/stage_record/
+ * stage_result themselves - the version-bump rule below is specifically
+ * about those three structs. An existing single-stage plugin needs no
+ * changes and no rebuild for this - it already works today, unaffected.
+ *
+ * These exports are NOT the whole lifecycle - struct stage's own
  * init(config)/teardown(state) are the real per-instance hooks, called
  * once per GRAPH NODE that uses this stage type (not once per .so),
  * before/after that node ever processes data. A stage needing to set
@@ -36,7 +65,7 @@
  * tier this project doesn't need yet would just be surface area to get
  * wrong.
  *
- * Both exports are FUNCTIONS, not data symbols - deliberately, so a
+ * All exports are FUNCTIONS, not data symbols - deliberately, so a
  * plugin's own build flags (LTO, dead-symbol stripping) can never
  * accidentally drop an unreferenced-looking `const` global before
  * dlsym() ever gets to look for it.
@@ -160,8 +189,15 @@
 
 #define STAGE_ABI_VERSION_SYMBOL "loom_stage_abi_version"
 #define STAGE_ABI_ENTRY_SYMBOL   "loom_stage_entry"
+/* Multi-stage "loomlet" export - see this file's own top comment for
+ * the full protocol. Deliberately not part of the Version N history
+ * above: it's a loading-protocol addition, not a change to struct
+ * stage/stage_record/stage_result, so it doesn't bump
+ * STAGE_ABI_VERSION and doesn't need one of these entries. */
+#define STAGE_ABI_ENTRY_AT_SYMBOL "loom_stage_entry_at"
 
 typedef uint32_t (*loom_stage_abi_version_fn)(void);
 typedef const struct stage *(*loom_stage_entry_fn)(void);
+typedef const struct stage *(*loom_stage_entry_at_fn)(unsigned index);
 
 #endif

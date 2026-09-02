@@ -15,17 +15,30 @@
  * project's own stages, never a second-class path only third parties
  * use.
  *
+ * A .so need not be exactly one stage type - a "loomlet" (stage_abi.h's
+ * own term) bundles several related stage types into one plugin via
+ * loom_stage_entry_at(index) instead of the ordinary single-stage
+ * loom_stage_entry(). This is transparent below the registry: each
+ * stage a loomlet contributes gets its own g_registry[]/g_handles[]
+ * slot exactly like a single-stage plugin's one stage would, so
+ * everything downstream of plugin_loader_load() (graph_config.c,
+ * web_status.c) never needs to know or care how many .so files
+ * actually produced the stages it sees.
+ *
  * The three query functions below are unchanged from the pre-plugin
  * design (same names, same signatures) - graph_config.c and
  * web_status.c need zero changes beyond the #include, since neither
  * ever assumed the backing store was compile-time-static, only that
  * it's populated before use (see plugin_loader_load()). */
 
-#define PLUGIN_REGISTRY_MAX 64  /* distinct stage TYPES (.so files) that
-				  * can be registered - unrelated to
-				  * pipeline.h's PIPELINE_MAX_STAGES, which
-				  * bounds NODES in one graph's chain, not
-				  * how many stage types exist at all. */
+#define PLUGIN_REGISTRY_MAX 64  /* distinct stage TYPES that can be
+				  * registered - NOT the same as the number
+				  * of .so files (a loomlet contributes more
+				  * than one stage type from a single .so) -
+				  * and unrelated to pipeline.h's
+				  * PIPELINE_MAX_STAGES, which bounds NODES in
+				  * one graph's chain, not how many stage
+				  * types exist at all. */
 
 /* Looks up a stage type by name (matches a graph JSON node's "type"
  * field, case-sensitive). Returns NULL if no such stage type was

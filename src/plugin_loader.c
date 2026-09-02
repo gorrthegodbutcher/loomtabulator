@@ -87,12 +87,62 @@ describe_in_types(unsigned in_types, char *buf, size_t buf_len)
 	}
 }
 
+/* Validates and registers one stage descriptor already obtained from a
+ * plugin (whether via the single-stage loom_stage_entry() or one call
+ * of a loomlet's loom_stage_entry_at(index) - see stage_abi.h's own
+ * header comment for the full protocol either way). `handle` is stored
+ * per REGISTERED STAGE, not per .so - a loomlet contributing several
+ * stages stores the SAME handle value at each of their registry slots,
+ * which is why plugin_loader_shutdown() below has to dedupe before
+ * dlclose()-ing.
+ *
+ * Returns false ONLY for a fatal condition (name collision, registry
+ * full) - an individual malformed descriptor is logged and skipped,
+ * still returning true, matching load_one_plugin()'s own "don't block
+ * graphs that only need OTHER, perfectly good plugins" posture (see
+ * plugin_loader.h's header comment). Does NOT dlclose() the handle on
+ * any path - the caller owns that decision, since a loomlet's later
+ * index might still register successfully even if an earlier one in
+ * the same .so didn't. */
+static bool
+register_stage(const char *path, void *handle, const struct stage *stage, char *errbuf, size_t errbuf_len)
+{
+	if (stage == NULL || stage->name == NULL || stage->process == NULL) {
+		fprintf(stderr, "loomtabulator: skipping plugin '%s': invalid or NULL stage descriptor\n", path);
+		return true;
+	}
+
+	if (stage_registry_find(stage->name) != NULL) {
+		snprintf(errbuf, errbuf_len,
+			 "plugin '%s' declares stage name '%s', which is already registered "
+			 "(by an earlier plugin or a built-in)", path, stage->name);
+		return false;
+	}
+	if (g_count >= PLUGIN_REGISTRY_MAX) {
+		snprintf(errbuf, errbuf_len,
+			 "too many stage plugins loaded (max %d) - '%s' didn't fit",
+			 PLUGIN_REGISTRY_MAX, path);
+		return false;
+	}
+
+	char in_types_desc[128];
+	describe_in_types(stage->in_types, in_types_desc, sizeof(in_types_desc));
+	fprintf(stderr, "loomtabulator: loaded plugin '%s': stage '%s' (%s -> %s)\n",
+		path, stage->name, in_types_desc, stage_port_type_name(stage->out_type));
+
+	g_registry[g_count] = stage;
+	g_handles[g_count] = handle;
+	g_count++;
+	return true;
+}
+
 /* Loads and validates one plugin. Returns false ONLY for a fatal
- * condition (name collision, registry full) - an individual plugin
- * that's malformed in its own right (won't dlopen, missing an export,
- * wrong ABI version, invalid descriptor) is logged and skipped, still
- * returning true, since that shouldn't block graphs that only need
- * OTHER, perfectly good plugins - see plugin_loader.h's own comment. */
+ * condition (name collision, registry full, propagated up from
+ * register_stage() above) - an individual plugin that's malformed in
+ * its own right (won't dlopen, missing an export, wrong ABI version,
+ * invalid descriptor) is logged and skipped, still returning true,
+ * since that shouldn't block graphs that only need OTHER, perfectly
+ * good plugins - see plugin_loader.h's own comment. */
 static bool
 load_one_plugin(const char *path, char *errbuf, size_t errbuf_len)
 {
@@ -118,6 +168,39 @@ load_one_plugin(const char *path, char *errbuf, size_t errbuf_len)
 		return true;
 	}
 
+	/* A "loomlet" (stage_abi.h's own term - a .so bundling more than one
+	 * stage type) exports loom_stage_entry_at INSTEAD of loom_stage_entry -
+	 * checked first, via dlsym(), so an ordinary single-stage plugin
+	 * (every built-in, and any third-party .so written before this
+	 * existed) simply doesn't export this symbol and takes the original
+	 * single-stage path below completely unchanged, no rebuild needed. */
+	loom_stage_entry_at_fn entry_at_fn =
+		(loom_stage_entry_at_fn)(void *)dlsym(handle, STAGE_ABI_ENTRY_AT_SYMBOL);
+	if (entry_at_fn != NULL) {
+		bool registered_any = false;
+		for (unsigned index = 0; ; index++) {
+			const struct stage *stage = entry_at_fn(index);
+			if (stage == NULL)
+				break;
+			registered_any = true;
+			if (!register_stage(path, handle, stage, errbuf, errbuf_len)) {
+				/* Fatal (name collision / registry full) - main.c
+				 * rte_exit()s right after seeing this false, so a
+				 * dangling g_registry/g_handles entry from a stage
+				 * registered earlier in this SAME loomlet, now
+				 * pointing into a handle this dlclose() unmaps,
+				 * is harmless: nothing reads the registry again
+				 * before the process exits. */
+				dlclose(handle);
+				return false;
+			}
+		}
+		if (!registered_any)
+			fprintf(stderr, "loomtabulator: skipping plugin '%s': %s returned no stages\n",
+				path, STAGE_ABI_ENTRY_AT_SYMBOL);
+		return true;
+	}
+
 	loom_stage_entry_fn entry_fn =
 		(loom_stage_entry_fn)(void *)dlsym(handle, STAGE_ABI_ENTRY_SYMBOL);
 	if (entry_fn == NULL) {
@@ -128,35 +211,10 @@ load_one_plugin(const char *path, char *errbuf, size_t errbuf_len)
 	}
 
 	const struct stage *stage = entry_fn();
-	if (stage == NULL || stage->name == NULL || stage->process == NULL) {
-		fprintf(stderr, "loomtabulator: skipping plugin '%s': invalid or NULL stage descriptor\n", path);
-		dlclose(handle);
-		return true;
-	}
-
-	if (stage_registry_find(stage->name) != NULL) {
-		snprintf(errbuf, errbuf_len,
-			 "plugin '%s' declares stage name '%s', which is already registered "
-			 "(by an earlier plugin or a built-in)", path, stage->name);
+	if (!register_stage(path, handle, stage, errbuf, errbuf_len)) {
 		dlclose(handle);
 		return false;
 	}
-	if (g_count >= PLUGIN_REGISTRY_MAX) {
-		snprintf(errbuf, errbuf_len,
-			 "too many stage plugins loaded (max %d) - '%s' didn't fit",
-			 PLUGIN_REGISTRY_MAX, path);
-		dlclose(handle);
-		return false;
-	}
-
-	char in_types_desc[128];
-	describe_in_types(stage->in_types, in_types_desc, sizeof(in_types_desc));
-	fprintf(stderr, "loomtabulator: loaded plugin '%s': stage '%s' (%s -> %s)\n",
-		path, stage->name, in_types_desc, stage_port_type_name(stage->out_type));
-
-	g_registry[g_count] = stage;
-	g_handles[g_count] = handle;
-	g_count++;
 	return true;
 }
 
@@ -190,7 +248,27 @@ plugin_loader_load(const char *plugins_dir, char *errbuf, size_t errbuf_len)
 void
 plugin_loader_shutdown(void)
 {
-	for (size_t i = g_count; i > 0; i--)
-		dlclose(g_handles[i - 1]);
+	/* A loomlet's several stages all share the SAME dlopen() handle
+	 * (see register_stage()'s own comment) - each unique handle must be
+	 * dlclose()'d exactly once, not once per stage that came from it (a
+	 * second dlclose() on an already-closed handle is undefined
+	 * behavior). This loop still runs newest-registered-first, same as
+	 * before, but skips a handle if it already appears at some index
+	 * CLOSER TO THE END of the array - i.e. already closed earlier in
+	 * this same reverse walk. Simple O(n^2) scan, fine at this size
+	 * (PLUGIN_REGISTRY_MAX) for a once-at-shutdown cold path - not worth
+	 * a smarter data structure for. */
+	for (size_t i = g_count; i > 0; i--) {
+		void *handle = g_handles[i - 1];
+		bool already_closed = false;
+		for (size_t j = i; j < g_count; j++) {
+			if (g_handles[j] == handle) {
+				already_closed = true;
+				break;
+			}
+		}
+		if (!already_closed)
+			dlclose(handle);
+	}
 	g_count = 0;
 }

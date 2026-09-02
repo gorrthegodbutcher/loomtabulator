@@ -146,6 +146,8 @@ test: build
 		../tests/plugin_fixtures/plugin_bad_version.c
 	$(CC) $(PLUGIN_CFLAGS) -shared -o build/test_plugin_fixtures_ok/plugin_missing_version.so \
 		../tests/plugin_fixtures/plugin_missing_version.c
+	$(CC) $(PLUGIN_CFLAGS) -shared -o build/test_plugin_fixtures_ok/plugin_loomlet.so \
+		../tests/plugin_fixtures/plugin_loomlet.c
 	$(CC) $(PLUGIN_CFLAGS) -shared -o build/test_plugin_fixtures_collision/plugin_dup_a.so \
 		../tests/plugin_fixtures/plugin_dup_a.c
 	$(CC) $(PLUGIN_CFLAGS) -shared -o build/test_plugin_fixtures_collision/plugin_dup_b.so \

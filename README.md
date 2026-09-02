@@ -294,6 +294,19 @@ trust boundary; loomtabulator does no sandboxing or vetting of plugins
 beyond an ABI-version check, an accepted tradeoff given it already
 runs in a container.
 
+A `.so` doesn't have to be exactly one stage type. A **loomlet** - a
+plugin bundling a family of related stage types together into one
+build (shared helper code, one file to drop into `--plugins-dir`
+instead of one per stage type) - exports `loom_stage_entry_at(index)`
+instead of the ordinary single-stage `loom_stage_entry()`; loomtabulator
+calls it with `index = 0, 1, 2, ...` until it returns `NULL`, registering
+each stage it hands back exactly like a single-stage plugin's one stage
+would be. This is an addition to the *loading protocol*, not a
+`STAGE_ABI_VERSION` bump - it doesn't touch `struct stage`'s own layout,
+so every existing single-stage plugin (every built-in included) needs no
+changes at all. See `plugin-sdk/README.md`'s "Loomlets" section for the
+full contract and a worked example.
+
 ## Verifying it end-to-end
 
 No NIC, vdev, or even a second machine needed. `testdata/example_graph.json`

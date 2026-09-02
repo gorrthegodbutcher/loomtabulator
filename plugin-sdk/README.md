@@ -34,8 +34,9 @@ like any built-in stage.
 
 ## The ABI
 
-A plugin exports exactly two functions (see `stage_abi.h` for the full
-contract):
+An ordinary, single-stage plugin exports exactly two functions (see
+`stage_abi.h` for the full contract; see "Loomlets" below for the
+multi-stage alternative to the second one):
 
 ```c
 uint32_t loom_stage_abi_version(void);       /* return STAGE_ABI_VERSION */
@@ -84,6 +85,65 @@ own `teardown()`. Two graph nodes of the same plugin type get two
 independent `init()` calls with two independent state pointers, so
 per-node resources (e.g. `forward_udp`'s own outbound socket) never
 collide between them.
+
+## Loomlets: bundling several stage types into one plugin
+
+A `.so` doesn't have to be exactly one stage type. A **loomlet** - this
+project's own term for a plugin bundling a family of related stage
+types together (sharing common code, built and shipped as one `.so`
+instead of one per stage type) - exports a third function INSTEAD of
+`loom_stage_entry()`:
+
+```c
+const struct stage *loom_stage_entry_at(unsigned index);
+```
+
+loomtabulator calls this with `index = 0, 1, 2, ...` in order until it
+gets `NULL` back, registering each non-`NULL` stage exactly like a
+single-stage plugin's one stage would be (same name-collision and
+registry-size checks, same startup log line per stage). Implement
+**exactly one** of `loom_stage_entry()`/`loom_stage_entry_at()` - never
+both, and don't fall back to one if you didn't intend the other:
+
+```c
+static const struct stage g_extract = { .name = "myfamily_extract", ... };
+static const struct stage g_router  = { .name = "myfamily_router", ... };
+
+const struct stage *
+loom_stage_entry_at(unsigned index)
+{
+	switch (index) {
+	case 0: return &g_extract;
+	case 1: return &g_router;
+	default: return NULL;
+	}
+}
+```
+
+A couple of things worth knowing:
+
+- **This isn't an `STAGE_ABI_VERSION` bump you need to track separately** -
+  it's an extension to the loading protocol (which symbols a `.so`
+  exports), not a change to `struct stage`/`stage_record`/
+  `stage_result`'s own layout. An ordinary single-stage plugin needs no
+  changes at all for this to exist - loomtabulator checks (via
+  `dlsym()`) whether `loom_stage_entry_at` exists before ever looking
+  for `loom_stage_entry`, so a plugin that doesn't export it simply
+  takes the original single-stage path, unaffected.
+- **Each stage still gets its own independent `init()`/`teardown()`
+  lifecycle**, same as always - bundling stage types into one `.so` is
+  purely a build/packaging convenience (shared helper code, one build
+  target, one file to drop into `--plugins-dir`), not a shared-state
+  mechanism between the stages themselves. Two stages from the same
+  loomlet know nothing about each other's instances.
+- **A name collision (with a built-in, or with any other loaded
+  plugin - including another one of your own loomlet's stages) is a
+  fatal startup error**, exactly like today - no special-casing for
+  "these two names came from the same file."
+- If `loom_stage_entry_at(0)` itself returns `NULL`, that's a valid
+  "this loomlet has nothing to offer" answer - logged and skipped, not
+  fatal, same posture a single-stage plugin's own `NULL`
+  `loom_stage_entry()` already has.
 
 ## Input types
 
@@ -317,7 +377,8 @@ out.
 - **Build for the host's own target triple.** loomtabulator doesn't
   cross-plugin-arch-check beyond what `dlopen()` itself refuses to
   load.
-- Both ABI exports are **functions, not data symbols**, deliberately -
+- All ABI exports (including `loom_stage_entry_at`, if you use it) are
+  **functions, not data symbols**, deliberately -
   this protects against a plugin's own build flags (LTO, dead-symbol
   stripping) dropping an unreferenced-looking `const` global before
   `dlsym()` ever looks for it. Don't change that shape.
