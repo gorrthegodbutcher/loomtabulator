@@ -3,7 +3,7 @@
 #include "ring_input.h"
 
 struct rte_ring *
-ring_input_create(const char *name, unsigned int size)
+ring_input_create(const char *name, unsigned int size, bool *out_owns_ring)
 {
 	/* A ring_output stage in a DIFFERENT, upstream loomtabulator
 	 * instance (same --file-prefix namespace - see
@@ -18,8 +18,10 @@ ring_input_create(const char *name, unsigned int size)
 	 * single-process/testgen case, or simply being the first instance
 	 * up in a chain that hasn't started producing yet. */
 	struct rte_ring *existing = rte_ring_lookup(name);
-	if (existing != NULL)
+	if (existing != NULL) {
+		*out_owns_ring = false;
 		return existing;
+	}
 
 	/* Phase 2: multi-consumer dequeue - N worker lcores now pull
 	 * competitively from this ring (see epoch_barrier.h for the ordering
@@ -32,5 +34,8 @@ ring_input_create(const char *name, unsigned int size)
 	 * the flag choice is per-ring, made by whichever side calls
 	 * rte_ring_create() for it, not a property this function enforces
 	 * on every ring anywhere. */
-	return rte_ring_create(name, size, rte_socket_id(), RING_F_SP_ENQ);
+	struct rte_ring *created = rte_ring_create(name, size, rte_socket_id(), RING_F_SP_ENQ);
+	if (created != NULL)
+		*out_owns_ring = true;
+	return created;
 }

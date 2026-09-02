@@ -132,8 +132,10 @@ main(void)
 	int eal_argc = rte_eal_init(sizeof(eal_args) / sizeof(eal_args[0]), eal_args);
 	assert(eal_argc >= 0);
 
-	struct rte_ring *ring = ring_input_create("TEST_PIPELINE_WORKERS_RING", RING_SIZE);
+	bool owns_ring = false;
+	struct rte_ring *ring = ring_input_create("TEST_PIPELINE_WORKERS_RING", RING_SIZE, &owns_ring);
 	assert(ring != NULL);
+	assert(owns_ring); /* nothing else could have created this ring first */
 
 	struct pipeline_chain chain = { .stage_count = 1 };
 	chain.stages[0].stage = &g_identity_stage;

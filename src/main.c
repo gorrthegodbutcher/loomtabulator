@@ -368,7 +368,13 @@ main(int argc, char **argv)
 	       opts.graph_path, chain.stage_count, graph_info.ring_name, graph_info.ring_size);
 	printf("Running the pipeline on %u worker lcore(s)\n", n_workers);
 
-	struct rte_ring *ring = ring_input_create(graph_info.ring_name, graph_info.ring_size);
+	/* owns_ring: true only if THIS call actually created the ring, false
+	 * if it merely attached to one an upstream ring_output stage in a
+	 * different process already owns (see ring_input.h's own comment) -
+	 * gates the shutdown drain/free below, so this process never drains
+	 * or frees a ring it doesn't own. */
+	bool owns_ring = false;
+	struct rte_ring *ring = ring_input_create(graph_info.ring_name, graph_info.ring_size, &owns_ring);
 	if (ring == NULL)
 		rte_exit(EXIT_FAILURE, "failed to create ring '%s': %s\n",
 			  graph_info.ring_name, rte_strerror(rte_errno));
@@ -484,15 +490,33 @@ main(int argc, char **argv)
 	rte_eal_mp_wait_lcore();
 	free(worker_ctxs);
 
-	/* Drain anything left in the ring (data or barrier records - both
-	 * freed the same way at shutdown, no special case needed since the
-	 * epoch_barrier's final state no longer matters), so the rte_malloc'd
-	 * blobs don't leak. rte_free(), not free() - see pipeline_worker.c's
-	 * own comment on why every ring item, from any producer, is
-	 * rte_malloc()'d. */
-	void *leftover = NULL;
-	while (rte_ring_dequeue(ring, &leftover) == 0)
-		rte_free(leftover);
+	/* Only if this process actually owns the ring (see owns_ring's own
+	 * comment above) - draining or freeing a ring it merely attached to
+	 * via rte_ring_lookup() would steal in-flight records from, or
+	 * outright destroy out from under, an upstream ring_output-owning
+	 * process that's still alive and still depends on it. Skipping both
+	 * entirely when !owns_ring is correct, not just "safer than
+	 * crashing": nothing this process could do to a ring it doesn't own
+	 * is its call to make. */
+	if (owns_ring) {
+		/* Drain anything left in the ring (data or barrier records -
+		 * both freed the same way at shutdown, no special case needed
+		 * since the epoch_barrier's final state no longer matters), so
+		 * the rte_malloc'd blobs don't leak. rte_free(), not free() -
+		 * see pipeline_worker.c's own comment on why every ring item,
+		 * from any producer, is rte_malloc()'d. */
+		void *leftover = NULL;
+		while (rte_ring_dequeue(ring, &leftover) == 0)
+			rte_free(leftover);
+
+		/* Releases the ring's own name/memzone registration - without
+		 * this, a fresh instance re-exec'd by a reload (see
+		 * g_reload_requested below) recreating the same ring_name has
+		 * always had to rely on --huge-unlink=existing purging the
+		 * whole previous run's hugepage segment instead of this process
+		 * cleaning up its own ring on the way out. */
+		rte_ring_free(ring);
+	}
 
 	web_status_stop();
 	app_web_status_destroy(&status);

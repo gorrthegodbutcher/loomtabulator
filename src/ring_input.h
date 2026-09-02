@@ -1,6 +1,7 @@
 #ifndef RING_INPUT_H
 #define RING_INPUT_H
 
+#include <stdbool.h>
 #include <rte_ring.h>
 
 /* Finds or creates the input rte_ring - rte_ring_lookup() first (in
@@ -46,7 +47,18 @@
  * so a secondary process's own invocation needs a matching
  * --file-prefix=loomtabulator too, or it won't find this ring at all.
  * A primary launched with its own explicit --file-prefix override
- * needs secondaries to match THAT value instead, obviously. */
-struct rte_ring *ring_input_create(const char *name, unsigned int size);
+ * needs secondaries to match THAT value instead, obviously.
+ *
+ * *out_owns_ring is set to true if THIS call is what created the ring
+ * (rte_ring_create() path) and false if it merely attached to one that
+ * already existed (rte_ring_lookup() path) - same owns_ring shape
+ * ring_output_stage.c already uses for the exact same reason. The
+ * caller (main.c) must only ever call rte_ring_free() on this ring, or
+ * drain it via rte_ring_dequeue() at shutdown, when this is true -
+ * doing either to a ring this process merely attached to would destroy
+ * or steal from a ring an upstream ring_output-owning process still
+ * depends on, the double-free/data-loss risk this split exists to
+ * prevent. */
+struct rte_ring *ring_input_create(const char *name, unsigned int size, bool *out_owns_ring);
 
 #endif
