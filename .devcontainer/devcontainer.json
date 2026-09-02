@@ -3,6 +3,7 @@
 	"build": {
 		"dockerfile": "Dockerfile"
 	},
+	"init": true,
 	"runArgs": [
 		"--privileged",
 		"-v", "/dev:/dev",
