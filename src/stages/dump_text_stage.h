@@ -7,5 +7,6 @@ void *dump_text_stage_init(const struct json_value *config);
 struct stage_result dump_text_stage_process(void *state, const struct stage_record *in,
 					     struct stage_record *out);
 void dump_text_stage_teardown(void *state);
+void dump_text_stage_get_config_schema(struct stage_config_schema *out);
 
 #endif

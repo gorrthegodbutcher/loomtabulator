@@ -11,6 +11,7 @@ static const struct stage g_stage = {
 	.init = extract_stage_init,
 	.process = extract_stage_process,
 	.teardown = extract_stage_teardown,
+	.get_config_schema = extract_stage_get_config_schema,
 };
 
 uint32_t

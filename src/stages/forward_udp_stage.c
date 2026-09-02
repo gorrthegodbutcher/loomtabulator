@@ -131,3 +131,41 @@ forward_udp_stage_teardown(void *state)
 		close(cfg->sock_fd);
 	free(cfg);
 }
+
+void
+forward_udp_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 4;
+	out->fields[0] = (struct stage_config_field){
+		.name = "dst_ip",
+		.type = CONFIG_FIELD_STRING,
+		.required = true,
+		.description = "Destination IPv4 address, dotted-quad.",
+	};
+	out->fields[1] = (struct stage_config_field){
+		.name = "dst_port",
+		.type = CONFIG_FIELD_INTEGER,
+		.required = true,
+		.description = "Destination UDP port.",
+		.has_min = true,
+		.min = 1,
+		.has_max = true,
+		.max = 65535,
+	};
+	out->fields[2] = (struct stage_config_field){
+		.name = "src_ip",
+		.type = CONFIG_FIELD_STRING,
+		.description = "Source IPv4 address to bind to - leave unset to let the kernel pick.",
+	};
+	out->fields[3] = (struct stage_config_field){
+		.name = "src_port",
+		.type = CONFIG_FIELD_INTEGER,
+		.description = "Source UDP port to bind to - leave unset (0) for an ephemeral port.",
+		.has_min = true,
+		.min = 0,
+		.has_max = true,
+		.max = 65535,
+		.has_default = true,
+		.default_value = "0",
+	};
+}

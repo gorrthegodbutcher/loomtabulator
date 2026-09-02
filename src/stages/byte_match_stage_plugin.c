@@ -12,6 +12,7 @@ static const struct stage g_stage = {
 	.process = byte_match_stage_process,
 	.teardown = byte_match_stage_teardown,
 	.get_status = byte_match_stage_get_status,
+	.get_config_schema = byte_match_stage_get_config_schema,
 };
 
 uint32_t

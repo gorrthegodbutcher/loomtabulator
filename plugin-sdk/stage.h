@@ -55,6 +55,93 @@ struct stage_status {
 	unsigned field_count;
 };
 
+/* Structural caps on struct stage.get_config_schema()'s output (version
+ * 7) - array/string sizing, not a real limit on how much a stage could
+ * conceivably want to describe; bump if a real plugin needs more. */
+#define STAGE_CONFIG_MAX_FIELDS 16
+#define STAGE_CONFIG_MAX_ENUM_VALUES 8
+#define STAGE_CONFIG_NAME_MAX 64
+#define STAGE_CONFIG_STRING_MAX 64
+
+/* The shape a struct stage_config_field's value takes - decides which
+ * of the fields below (min/max, enum_values, item_fields) are
+ * meaningful. Deliberately a small closed set, same "shape, not
+ * validation" posture enum stage_port_type already takes - a field's
+ * OWN init() is still what actually enforces a config value, this is
+ * only ever used to render a GUI form and pre-populate sensible inputs,
+ * never to replace real validation. */
+enum stage_config_field_type {
+	CONFIG_FIELD_STRING,
+	CONFIG_FIELD_INTEGER,
+	CONFIG_FIELD_NUMBER,
+	CONFIG_FIELD_BOOLEAN,
+	CONFIG_FIELD_ENUM,
+	CONFIG_FIELD_ARRAY,
+};
+
+/* One config field a stage's init() reads from its JSON config object -
+ * e.g. extract_stage.c's "field_offset_bytes". Fixed-size throughout
+ * (name/description/enum_values/default_value/depends_on_* are all
+ * either inline char arrays or string-literal pointers, same lifetime
+ * discipline struct stage_result.drop_reason already uses), so this is
+ * safely copyable by value across the ABI boundary with no ownership
+ * question - same reasoning struct stage_status_field's own comment
+ * gives for counters, just applied to config metadata instead.
+ *
+ * default_value is always a STRING regardless of `type` (e.g. "true",
+ * "4096", "numeric") rather than a tagged union - deliberately: it
+ * keeps this struct simple and uniform, and every consumer (a GUI
+ * form) needs to render it as displayable text anyway. Same encoding
+ * is used for depends_on_value below and for each enum_values[] entry.
+ *
+ * depends_on_field/depends_on_value model a field that only applies -
+ * is shown, and only THEN is `required` enforced - when a SIBLING
+ * field (named here, in the same fields[]/item_fields[] array) equals
+ * a specific value: e.g. extract's field_width_bytes only applies
+ * when mode == "numeric". Empty depends_on_field means "always
+ * applies", the common case. This does not replace a stage's own
+ * init()-time validation - graph_config_load() is still what actually
+ * enforces a bad/missing value as a startup failure; this is metadata
+ * for building a GUI form, not a second validation path. */
+struct stage_config_field {
+	char name[STAGE_CONFIG_NAME_MAX];
+	enum stage_config_field_type type;
+	bool required;
+	const char *description; /* string literal, NULL ok */
+
+	bool has_min, has_max; /* CONFIG_FIELD_INTEGER/NUMBER only */
+	double min, max;
+
+	/* CONFIG_FIELD_ENUM only. */
+	char enum_values[STAGE_CONFIG_MAX_ENUM_VALUES][STAGE_CONFIG_STRING_MAX];
+	unsigned enum_value_count;
+
+	bool has_default;
+	char default_value[STAGE_CONFIG_STRING_MAX];
+
+	/* CONFIG_FIELD_ARRAY only - describes each array element's own
+	 * object shape, one level of nesting (an item_fields entry must
+	 * not itself be type CONFIG_FIELD_ARRAY - not enforced by the type
+	 * system, a documented convention only, same "no reserved padding
+	 * or versioning scheme" posture stage_abi.h's own header comment
+	 * already takes). Points at a plugin-owned static array - same
+	 * lifetime discipline as `description` above. */
+	const struct stage_config_field *item_fields;
+	unsigned item_field_count;
+
+	char depends_on_field[STAGE_CONFIG_NAME_MAX];
+	char depends_on_value[STAGE_CONFIG_STRING_MAX];
+};
+
+/* A stage type's full config schema - see struct stage's own
+ * get_config_schema comment for when/how this gets filled. field_count
+ * == 0 is a normal answer (this stage takes no config, e.g.
+ * null_sink), not an error. */
+struct stage_config_schema {
+	struct stage_config_field fields[STAGE_CONFIG_MAX_FIELDS];
+	unsigned field_count;
+};
+
 /* Turns an enum stage_port_type value into its bit for struct
  * stage.in_types below - a stage accepting several input types ORs
  * these together (e.g. PORT_TYPE_BIT(PORT_TYPE_RAW_RECORD) |
@@ -327,6 +414,22 @@ struct stage {
 	 * this runs on the same thread that also drives the status-server
 	 * update loop and the shutdown poll. */
 	void (*get_status)(void *state, struct stage_status *out);
+
+	/* Optional (version 7) - NULL means "this stage has nothing to
+	 * describe" (e.g. null_sink, which reads no config at all); the web
+	 * UI falls back to a raw-JSON editor for a stage without one, same
+	 * graceful-degradation posture get_status's own NULL default has.
+	 * Called once per stage TYPE - no instance, no init(), no live
+	 * config value - straight off the registry the same way `name`/
+	 * `in_types`/`out_type` already are (see plugin_loader.c's
+	 * stage_registry and web_status.c's handle_stage_types()), since a
+	 * schema describes what a config CAN look like, not what one
+	 * particular node's config currently holds. *out is zero-initialized
+	 * by the caller first, same ABI-level guarantee process()/
+	 * get_status()'s own *out already gets. Not a hot-path concern -
+	 * called at most once per stage type per GET /api/stage-types
+	 * request, never per-record, never per-instance. */
+	void (*get_config_schema)(struct stage_config_schema *out);
 };
 
 #endif

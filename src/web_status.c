@@ -23,9 +23,13 @@
  * not the fixed 4 built-ins this used to always be - handle_stage_types()
  * is snprintf()-bounded so it can't overflow this buffer, but it WILL
  * silently truncate into invalid JSON if this constant doesn't keep up
- * with the real registry cap. ~128 bytes/entry is generous for a
- * "name"/in_type/out_type triple, so 64 * 128 + slack rounds up to: */
-#define STAGE_TYPES_JSON_BUF_SIZE 16384
+ * with the real registry cap. Each stage can now also carry a
+ * config_schema (version 7) of up to STAGE_CONFIG_MAX_FIELDS fields,
+ * each potentially carrying enum_values/item_fields of its own - a few
+ * hundred bytes per field is generous, so this is sized well above what
+ * every actual built-in needs (a handful of fields each) to leave real
+ * headroom for a third-party plugin with a bigger schema. */
+#define STAGE_TYPES_JSON_BUF_SIZE 131072
 #define ACCEPT_POLL_TIMEOUT_MS 1000
 #define WEB_ROOT_MAX_PATH 512
 #define STATIC_FILE_MAX_BYTES (5 * 1024 * 1024)
@@ -318,6 +322,162 @@ handle_status_json(int fd, struct app_web_status *status)
 	send_response(fd, "200 OK", "application/json", json);
 }
 
+/* Appends src into dst (bounded by dst_size), escaping '"' and '\\' so
+ * the result is safe to embed inside a JSON string literal -
+ * graph_config.c's error messages can echo back attacker-controlled
+ * node ids/types straight out of the POSTed graph (e.g. "unknown stage
+ * type '%s'"), so this is correctness (valid JSON out), not just
+ * cosmetic. Moved ahead of handle_stage_types() below (it used to sit
+ * after handle_stage_status(), the first caller added) since
+ * config-schema serialization needs it too and this file has no
+ * forward declarations anywhere else. */
+static void
+json_escape_append(char *dst, size_t dst_size, size_t *off, const char *src)
+{
+	for (; *src != '\0' && *off + 2 < dst_size; src++) {
+		if (*src == '"' || *src == '\\')
+			dst[(*off)++] = '\\';
+		dst[(*off)++] = *src;
+	}
+	dst[*off] = '\0';
+}
+
+static const char *
+config_field_type_name(enum stage_config_field_type type)
+{
+	switch (type) {
+	case CONFIG_FIELD_STRING: return "string";
+	case CONFIG_FIELD_INTEGER: return "integer";
+	case CONFIG_FIELD_NUMBER: return "number";
+	case CONFIG_FIELD_BOOLEAN: return "boolean";
+	case CONFIG_FIELD_ENUM: return "enum";
+	case CONFIG_FIELD_ARRAY: return "array";
+	default: return "unknown";
+	}
+}
+
+/* Serializes one struct stage_config_field as a JSON object appended at
+ * *off - shared by serialize_config_schema() below for both a stage's
+ * own top-level fields and (recursively, one level deep only - see
+ * struct stage_config_field's own comment in stage.h) an ARRAY field's
+ * item_fields, since both are just a list of these. */
+static void
+serialize_config_field(char *json, size_t json_size, size_t *off, const struct stage_config_field *f)
+{
+	int n = snprintf(json + *off, json_size - *off, "{ \"name\": \"");
+	if (n > 0)
+		*off += (size_t)n;
+	json_escape_append(json, json_size, off, f->name);
+	n = snprintf(json + *off, json_size - *off, "\", \"type\": \"%s\", \"required\": %s",
+		      config_field_type_name(f->type), f->required ? "true" : "false");
+	if (n > 0)
+		*off += (size_t)n;
+
+	if (f->description != NULL) {
+		n = snprintf(json + *off, json_size - *off, ", \"description\": \"");
+		if (n > 0)
+			*off += (size_t)n;
+		json_escape_append(json, json_size, off, f->description);
+		n = snprintf(json + *off, json_size - *off, "\"");
+		if (n > 0)
+			*off += (size_t)n;
+	}
+	if (f->has_min) {
+		n = snprintf(json + *off, json_size - *off, ", \"min\": %g", f->min);
+		if (n > 0)
+			*off += (size_t)n;
+	}
+	if (f->has_max) {
+		n = snprintf(json + *off, json_size - *off, ", \"max\": %g", f->max);
+		if (n > 0)
+			*off += (size_t)n;
+	}
+	if (f->enum_value_count > 0) {
+		n = snprintf(json + *off, json_size - *off, ", \"enum_values\": [");
+		if (n > 0)
+			*off += (size_t)n;
+		for (unsigned i = 0; i < f->enum_value_count && *off < json_size; i++) {
+			n = snprintf(json + *off, json_size - *off, "%s\"", i > 0 ? ", " : "");
+			if (n > 0)
+				*off += (size_t)n;
+			json_escape_append(json, json_size, off, f->enum_values[i]);
+			n = snprintf(json + *off, json_size - *off, "\"");
+			if (n > 0)
+				*off += (size_t)n;
+		}
+		n = snprintf(json + *off, json_size - *off, "]");
+		if (n > 0)
+			*off += (size_t)n;
+	}
+	if (f->has_default) {
+		n = snprintf(json + *off, json_size - *off, ", \"default\": \"");
+		if (n > 0)
+			*off += (size_t)n;
+		json_escape_append(json, json_size, off, f->default_value);
+		n = snprintf(json + *off, json_size - *off, "\"");
+		if (n > 0)
+			*off += (size_t)n;
+	}
+	if (f->depends_on_field[0] != '\0') {
+		n = snprintf(json + *off, json_size - *off, ", \"depends_on_field\": \"");
+		if (n > 0)
+			*off += (size_t)n;
+		json_escape_append(json, json_size, off, f->depends_on_field);
+		n = snprintf(json + *off, json_size - *off, "\", \"depends_on_value\": \"");
+		if (n > 0)
+			*off += (size_t)n;
+		json_escape_append(json, json_size, off, f->depends_on_value);
+		n = snprintf(json + *off, json_size - *off, "\"");
+		if (n > 0)
+			*off += (size_t)n;
+	}
+	if (f->type == CONFIG_FIELD_ARRAY && f->item_field_count > 0) {
+		n = snprintf(json + *off, json_size - *off, ", \"item_fields\": [");
+		if (n > 0)
+			*off += (size_t)n;
+		for (unsigned i = 0; i < f->item_field_count && *off < json_size; i++) {
+			if (i > 0) {
+				n = snprintf(json + *off, json_size - *off, ", ");
+				if (n > 0)
+					*off += (size_t)n;
+			}
+			serialize_config_field(json, json_size, off, &f->item_fields[i]);
+		}
+		n = snprintf(json + *off, json_size - *off, "]");
+		if (n > 0)
+			*off += (size_t)n;
+	}
+
+	n = snprintf(json + *off, json_size - *off, " }");
+	if (n > 0)
+		*off += (size_t)n;
+}
+
+/* Serializes a stage TYPE's full config schema as a JSON array of field
+ * objects - called from handle_stage_types() below only when the stage
+ * actually has a get_config_schema (NULL means "omit config_schema
+ * entirely from this stage's JSON object", not "emit an empty array" -
+ * the web UI tells "no schema, fall back to raw JSON" apart from "a
+ * schema that happens to have zero fields" this way). */
+static void
+serialize_config_schema(char *json, size_t json_size, size_t *off, const struct stage_config_schema *schema)
+{
+	int n = snprintf(json + *off, json_size - *off, "[");
+	if (n > 0)
+		*off += (size_t)n;
+	for (unsigned i = 0; i < schema->field_count && *off < json_size; i++) {
+		if (i > 0) {
+			n = snprintf(json + *off, json_size - *off, ", ");
+			if (n > 0)
+				*off += (size_t)n;
+		}
+		serialize_config_field(json, json_size, off, &schema->fields[i]);
+	}
+	n = snprintf(json + *off, json_size - *off, "]");
+	if (n > 0)
+		*off += (size_t)n;
+}
+
 /* Serializes plugin_loader.c's dynamically-populated registry (every
  * successfully-loaded stage plugin, built-in or third-party) - the
  * Phase 3 web UI's palette and connection rules ("can I wire these two
@@ -352,8 +512,22 @@ handle_stage_types(int fd)
 			first_type = false;
 		}
 
-		n = snprintf(json + off, sizeof(json) - off, "], \"out_type\": \"%s\" }%s\n",
-			stage_port_type_name(s->out_type), i + 1 < count ? "," : "");
+		n = snprintf(json + off, sizeof(json) - off, "], \"out_type\": \"%s\"",
+			stage_port_type_name(s->out_type));
+		if (n > 0)
+			off += (size_t)n;
+
+		if (s->get_config_schema != NULL) {
+			struct stage_config_schema schema;
+			memset(&schema, 0, sizeof(schema));
+			s->get_config_schema(&schema);
+			n = snprintf(json + off, sizeof(json) - off, ", \"config_schema\": ");
+			if (n > 0)
+				off += (size_t)n;
+			serialize_config_schema(json, sizeof(json), &off, &schema);
+		}
+
+		n = snprintf(json + off, sizeof(json) - off, " }%s\n", i + 1 < count ? "," : "");
 		if (n > 0)
 			off += (size_t)n;
 	}
@@ -381,23 +555,6 @@ handle_get_graph(int fd, const struct web_graph_ctx *graph_ctx)
 		return;
 	}
 	send_response(fd, "200 OK", "application/json", graph_ctx->current_graph_json);
-}
-
-/* Appends src into dst (bounded by dst_size), escaping '"' and '\\' so
- * the result is safe to embed inside a JSON string literal -
- * graph_config.c's error messages can echo back attacker-controlled
- * node ids/types straight out of the POSTed graph (e.g. "unknown stage
- * type '%s'"), so this is correctness (valid JSON out), not just
- * cosmetic. */
-static void
-json_escape_append(char *dst, size_t dst_size, size_t *off, const char *src)
-{
-	for (; *src != '\0' && *off + 2 < dst_size; src++) {
-		if (*src == '"' || *src == '\\')
-			dst[(*off)++] = '\\';
-		dst[(*off)++] = *src;
-	}
-	dst[*off] = '\0';
 }
 
 /* GET /api/stage-status: struct app_web_status.stage_statuses[], filled

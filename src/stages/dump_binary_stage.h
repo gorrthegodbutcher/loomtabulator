@@ -8,5 +8,6 @@ struct stage_result dump_binary_stage_process(void *state, const struct stage_re
 					       struct stage_record *out);
 void dump_binary_stage_teardown(void *state);
 void dump_binary_stage_get_status(void *state, struct stage_status *out);
+void dump_binary_stage_get_config_schema(struct stage_config_schema *out);
 
 #endif

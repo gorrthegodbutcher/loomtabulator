@@ -439,6 +439,42 @@ run_get_status_test(void)
 	dump_binary_stage_teardown(binary_state);
 }
 
+/* extract_stage.c is the worked example for depends_on_field (ABI
+ * version 7, stage_abi.h) - field_width_bytes only applies when
+ * mode == "numeric", field_length_bytes only when mode == "bytes".
+ * Confirms the schema actually says that, not just that it compiles. */
+static void
+run_get_config_schema_test(void)
+{
+	struct stage_config_schema schema = {0};
+	extract_stage_get_config_schema(&schema);
+	assert(schema.field_count == 4);
+
+	const struct stage_config_field *mode = &schema.fields[0];
+	assert(strcmp(mode->name, "mode") == 0);
+	assert(mode->type == CONFIG_FIELD_ENUM);
+	assert(mode->depends_on_field[0] == '\0'); /* always applies */
+	assert(mode->enum_value_count == 2);
+	assert(strcmp(mode->enum_values[0], "numeric") == 0);
+	assert(strcmp(mode->enum_values[1], "bytes") == 0);
+	assert(mode->has_default && strcmp(mode->default_value, "numeric") == 0);
+
+	const struct stage_config_field *width = &schema.fields[2];
+	assert(strcmp(width->name, "field_width_bytes") == 0);
+	assert(width->required);
+	assert(strcmp(width->depends_on_field, "mode") == 0);
+	assert(strcmp(width->depends_on_value, "numeric") == 0);
+
+	const struct stage_config_field *length = &schema.fields[3];
+	assert(strcmp(length->name, "field_length_bytes") == 0);
+	assert(length->required);
+	assert(strcmp(length->depends_on_field, "mode") == 0);
+	assert(strcmp(length->depends_on_value, "bytes") == 0);
+
+	printf("PASS: extract_stage_get_config_schema() reports field_width_bytes/"
+	       "field_length_bytes as conditional on mode, correctly\n");
+}
+
 /* null_sink: accepts anything, counts it, discards it, produces no
  * output - exercised directly (init/process/get_status/teardown, no
  * graph_config.c involved), same shape as run_dump_stage_tests()
@@ -594,6 +630,7 @@ main(void)
 	run_invalid_routing_test();
 	run_dump_stage_tests();
 	run_get_status_test();
+	run_get_config_schema_test();
 	run_null_sink_test();
 
 	printf("\nALL TESTS PASSED\n");

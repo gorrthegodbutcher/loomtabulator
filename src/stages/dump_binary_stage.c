@@ -77,3 +77,15 @@ dump_binary_stage_get_status(void *state, struct stage_status *out)
 	snprintf(out->fields[1].name, STAGE_STATUS_NAME_MAX, "bytes_written");
 	out->fields[1].value = atomic_load_explicit(&cfg->bytes_written, memory_order_relaxed);
 }
+
+void
+dump_binary_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 1;
+	out->fields[0] = (struct stage_config_field){
+		.name = "path",
+		.type = CONFIG_FIELD_STRING,
+		.required = true,
+		.description = "File to write raw record bytes to, verbatim, in order.",
+	};
+}

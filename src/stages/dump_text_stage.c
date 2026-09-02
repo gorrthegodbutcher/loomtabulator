@@ -64,3 +64,15 @@ dump_text_stage_teardown(void *state)
 		fclose(cfg->f);
 	free(cfg);
 }
+
+void
+dump_text_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 1;
+	out->fields[0] = (struct stage_config_field){
+		.name = "path",
+		.type = CONFIG_FIELD_STRING,
+		.required = true,
+		.description = "File to write ASCII-formatted values to.",
+	};
+}

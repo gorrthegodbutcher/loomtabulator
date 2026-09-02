@@ -214,3 +214,25 @@ ring_output_stage_get_status(void *state, struct stage_status *out)
 	snprintf(out->fields[2].name, STAGE_STATUS_NAME_MAX, "bytes_enqueued");
 	out->fields[2].value = atomic_load_explicit(&cfg->bytes_enqueued, memory_order_relaxed);
 }
+
+void
+ring_output_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 2;
+	out->fields[0] = (struct stage_config_field){
+		.name = "ring_name",
+		.type = CONFIG_FIELD_STRING,
+		.required = true,
+		.description = "Name of the rte_ring to create - a downstream instance's own "
+			       "input.ring_name must match this exactly.",
+	};
+	out->fields[1] = (struct stage_config_field){
+		.name = "ring_size",
+		.type = CONFIG_FIELD_INTEGER,
+		.description = "Ring capacity in records (rounded up to a power of 2 by DPDK).",
+		.has_min = true,
+		.min = 1,
+		.has_default = true,
+		.default_value = "4096",
+	};
+}

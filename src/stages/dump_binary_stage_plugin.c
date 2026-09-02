@@ -24,6 +24,7 @@ static const struct stage g_stage = {
 	.process = dump_binary_stage_process,
 	.teardown = dump_binary_stage_teardown,
 	.get_status = dump_binary_stage_get_status,
+	.get_config_schema = dump_binary_stage_get_config_schema,
 };
 
 uint32_t

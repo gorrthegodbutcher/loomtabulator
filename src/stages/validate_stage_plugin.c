@@ -16,6 +16,7 @@ static const struct stage g_stage = {
 	.process = validate_stage_process,
 	.teardown = validate_stage_teardown,
 	.get_status = validate_stage_get_status,
+	.get_config_schema = validate_stage_get_config_schema,
 };
 
 uint32_t

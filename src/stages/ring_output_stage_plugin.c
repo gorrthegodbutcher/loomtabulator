@@ -25,6 +25,7 @@ static const struct stage g_stage = {
 	.process = ring_output_stage_process,
 	.teardown = ring_output_stage_teardown,
 	.get_status = ring_output_stage_get_status,
+	.get_config_schema = ring_output_stage_get_config_schema,
 };
 
 uint32_t

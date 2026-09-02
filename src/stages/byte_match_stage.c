@@ -181,3 +181,30 @@ byte_match_stage_get_status(void *state, struct stage_status *out)
 	snprintf(out->fields[2].name, STAGE_STATUS_NAME_MAX, "records_unmatched");
 	out->fields[2].value = atomic_load_explicit(&cfg->unmatched, memory_order_relaxed);
 }
+
+void
+byte_match_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 3;
+	out->fields[0] = (struct stage_config_field){
+		.name = "magic",
+		.type = CONFIG_FIELD_STRING,
+		.required = true,
+		.description = "Hex string to match against, e.g. \"DEADBEEF04\" (even length).",
+	};
+	out->fields[1] = (struct stage_config_field){
+		.name = "mask",
+		.type = CONFIG_FIELD_STRING,
+		.description = "Hex string, same byte length as magic - defaults to all-FF "
+			       "(exact match) if omitted.",
+	};
+	out->fields[2] = (struct stage_config_field){
+		.name = "offset",
+		.type = CONFIG_FIELD_INTEGER,
+		.description = "Byte offset into the record to match at.",
+		.has_min = true,
+		.min = 0,
+		.has_default = true,
+		.default_value = "0",
+	};
+}

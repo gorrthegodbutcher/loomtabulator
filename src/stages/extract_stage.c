@@ -154,3 +154,53 @@ extract_stage_teardown(void *state)
 {
 	free(state);
 }
+
+/* The worked example for depends_on_field (stage_abi.h's version 7
+ * entry) - field_width_bytes and field_length_bytes are mutually
+ * exclusive, gated on mode, exactly mirroring extract_stage_init()'s
+ * own two-branch logic above. Real enforcement stays there - this only
+ * describes the shape for a GUI form to render. */
+void
+extract_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 4;
+
+	out->fields[0] = (struct stage_config_field){
+		.name = "mode",
+		.type = CONFIG_FIELD_ENUM,
+		.description = "Which extraction mode to use.",
+		.enum_values = { "numeric", "bytes" },
+		.enum_value_count = 2,
+		.has_default = true,
+		.default_value = "numeric",
+	};
+	out->fields[1] = (struct stage_config_field){
+		.name = "field_offset_bytes",
+		.type = CONFIG_FIELD_INTEGER,
+		.description = "Byte offset into the record's payload (after the chrono_record_hdr).",
+		.has_min = true,
+		.min = 0,
+		.has_default = true,
+		.default_value = "0",
+	};
+	out->fields[2] = (struct stage_config_field){
+		.name = "field_width_bytes",
+		.type = CONFIG_FIELD_ENUM,
+		.required = true,
+		.description = "Numeric mode only: width of the big-endian field to read.",
+		.enum_values = { "2", "4", "8" },
+		.enum_value_count = 3,
+		.depends_on_field = "mode",
+		.depends_on_value = "numeric",
+	};
+	out->fields[3] = (struct stage_config_field){
+		.name = "field_length_bytes",
+		.type = CONFIG_FIELD_INTEGER,
+		.required = true,
+		.description = "Bytes mode only: length of the raw byte slice to copy out.",
+		.has_min = true,
+		.min = 1,
+		.depends_on_field = "mode",
+		.depends_on_value = "bytes",
+	};
+}

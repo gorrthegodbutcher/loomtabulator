@@ -8,5 +8,6 @@ struct stage_result validate_stage_process(void *state, const struct stage_recor
 					    struct stage_record *out);
 void validate_stage_teardown(void *state);
 void validate_stage_get_status(void *state, struct stage_status *out);
+void validate_stage_get_config_schema(struct stage_config_schema *out);
 
 #endif

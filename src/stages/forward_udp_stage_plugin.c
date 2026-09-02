@@ -25,6 +25,7 @@ static const struct stage g_stage = {
 	.out_port_count = forward_udp_out_port_count,
 	.process = forward_udp_stage_process,
 	.teardown = forward_udp_stage_teardown,
+	.get_config_schema = forward_udp_stage_get_config_schema,
 };
 
 uint32_t

@@ -226,6 +226,83 @@ Values are plain counters (`uint64_t`) only for now, not a richer typed
 value (a string state, a float average) - every real use case so far is
 a counter, and widening later is a small, additive change if one isn't.
 
+## Optional: describing your config for a GUI form
+
+`struct stage.get_config_schema(out)` is an optional callback (since
+`STAGE_ABI_VERSION` 7) a stage TYPE uses to describe its own `config`
+fields - name, type, required/optional, numeric range, enum values,
+default value - so the web UI can render a real form instead of asking
+the graph author to hand-write JSON. `NULL` (the default - leave the
+field out of your `g_stage` initializer entirely) means "no schema,"
+which falls back to a raw JSON editor - a perfectly reasonable thing to
+leave unset for a stage with no config, or while you're still
+prototyping.
+
+Unlike `get_status()`, this is called **once per stage type**, with no
+instance and no live config value involved - `init()` never runs for
+this. It's static metadata ("what CAN this config look like"), not a
+snapshot of one particular node's current settings, so there's no state
+to build and nothing to teardown.
+
+```c
+static void
+my_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 1;
+	out->fields[0] = (struct stage_config_field){
+		.name = "path",
+		.type = CONFIG_FIELD_STRING,
+		.required = true,
+		.description = "File to write records to.",
+	};
+}
+```
+
+Fill up to `STAGE_CONFIG_MAX_FIELDS` entries in `out->fields[]` (arrives
+zero-initialized, same guarantee `process()`'s own `*out` gets).
+`enum stage_config_field_type` (`stage.h`) is `CONFIG_FIELD_STRING`,
+`_INTEGER`, `_NUMBER`, `_BOOLEAN`, `_ENUM`, or `_ARRAY` - each unlocks a
+different subset of the struct's other fields:
+
+- `has_min`/`min`, `has_max`/`max` - `INTEGER`/`NUMBER` only.
+- `enum_values[]`/`enum_value_count` - `ENUM` only, up to
+  `STAGE_CONFIG_MAX_ENUM_VALUES` values.
+- `item_fields`/`item_field_count` - `ARRAY` only, describing each array
+  element's own object shape as its own small `struct stage_config_field`
+  list, **one level of nesting deep** (an `item_fields` entry must not
+  itself be type `ARRAY`).
+- `has_default`/`default_value` - any type; `default_value` is always a
+  string regardless of the field's real type (`"true"`, `"4096"`,
+  `"numeric"`), since a GUI form needs it as displayable text anyway.
+
+A field that only applies depending on another field's current value -
+the built-in `extract` stage is the worked example, where
+`field_width_bytes` only matters when `mode == "numeric"` and
+`field_length_bytes` only when `mode == "bytes"` - sets
+`depends_on_field`/`depends_on_value` to name the sibling field (must be
+in the same `fields[]`, or the same `item_fields[]` for a nested
+field) and the value it must equal:
+
+```c
+out->fields[2] = (struct stage_config_field){
+	.name = "field_width_bytes",
+	.type = CONFIG_FIELD_ENUM,
+	.required = true,
+	.enum_values = { "2", "4", "8" },
+	.enum_value_count = 3,
+	.depends_on_field = "mode",
+	.depends_on_value = "numeric",
+};
+```
+
+Leave `depends_on_field` empty (the default) for a field that always
+applies - most fields. This is purely GUI metadata, not a second
+validation path: your own `init()` remains the sole real enforcement of
+a config value, checked at graph-load time exactly as it always has
+been - a schema just makes the *shape* of what you expect visible ahead
+of time, instead of a graph author having to read your source to find
+out.
+
 ## Build rules
 
 - **No bitfields, no `#pragma pack`** on anything in `struct stage`,

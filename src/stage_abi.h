@@ -131,8 +131,32 @@
  * existing stage (built-in or third-party) simply leaves this NULL by
  * default via C's own designated-initializer zero-fill, so this bump
  * needs a rebuild but no source change unless a stage author actually
- * wants to opt in. */
-#define STAGE_ABI_VERSION 6u
+ * wants to opt in.
+ *
+ * Version 7 (current): added struct stage.get_config_schema(out) - an
+ * optional callback (NULL default, same zero-fill rollout story version
+ * 6 already established) a stage TYPE uses to describe its own config
+ * fields (name, type, required, numeric range, enum values, default,
+ * one level of array-of-object nesting, and simple same-object
+ * conditional fields via depends_on_field/depends_on_value) so the web
+ * UI can render a real form instead of a raw JSON textarea - see
+ * struct stage_config_field/struct stage_config_schema (stage.h) for
+ * the fixed-size, pointer-free shape this reports through, same
+ * lifetime discipline struct stage_status already established for the
+ * exact same reason. Unlike get_status, this is called once per stage
+ * TYPE with no instance and no init() involved (see plugin_loader.c's
+ * registry and web_status.c's handle_stage_types()) - a schema
+ * describes what a config CAN look like, not what one particular
+ * node's config currently holds, so there's no state to build. This
+ * does not add a second validation path: a stage's own init() (checked
+ * at graph_config_load() time, same as always) remains the sole real
+ * enforcement of a config value; the schema exists purely to build a
+ * GUI form and pre-populate sensible inputs. extract_stage.c is the
+ * worked example for depends_on_field (field_width_bytes only applies
+ * when mode == "numeric", field_length_bytes only when mode ==
+ * "bytes") - see its own get_config_schema for the exact shape a
+ * conditional field takes. */
+#define STAGE_ABI_VERSION 7u
 
 #define STAGE_ABI_VERSION_SYMBOL "loom_stage_abi_version"
 #define STAGE_ABI_ENTRY_SYMBOL   "loom_stage_entry"

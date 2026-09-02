@@ -16,7 +16,8 @@ import {
   useNodesInitialized,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { fetchStageTypes, type StageType } from "./stageTypes";
+import { fetchStageTypes, type StageType, type ConfigField } from "./stageTypes";
+import { ConfigForm, applyConfigDefaults } from "./ConfigForm";
 import {
   fetchGraph,
   saveGraph,
@@ -127,9 +128,23 @@ function App() {
   const reactFlowContainerRef = useRef<HTMLElement>(null);
   const [graphApiEnabled, setGraphApiEnabled] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null);
-  const [configEditor, setConfigEditor] = useState<{ nodeId: string; text: string; error: string | null } | null>(
-    null,
-  );
+  // schema/formValue are non-null exactly when the node's stage type has
+  // a config_schema (see stageTypes.ts) - ConfigForm renders formValue
+  // directly then; otherwise (no schema, or the synthetic ring-input
+  // node) mode stays "json" and text is the only source of truth. Both
+  // representations are kept around and synced on toggle so "Edit as
+  // JSON" stays available even for a schema-driven stage, as an escape
+  // hatch for whatever a flat/one-level-nesting schema can't express -
+  // graph_config_load() at Save time is the real validation backstop
+  // either way, unchanged.
+  const [configEditor, setConfigEditor] = useState<{
+    nodeId: string;
+    text: string;
+    error: string | null;
+    schema: ConfigField[] | null;
+    formValue: Record<string, unknown> | null;
+    mode: "form" | "json";
+  } | null>(null);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
   // Set by refreshGraphFromServer() whenever it actually loads a graph
   // (startup, or a GraphLibraryDialog Load), consumed by onNodesInitialized
@@ -501,30 +516,83 @@ function App() {
   const handleOpenConfigure = useCallback(
     (nodeId: string) => {
       if (nodeId === RING_INPUT_NODE_ID) {
-        setConfigEditor({ nodeId, text: JSON.stringify(graphMeta.current.input, null, 2), error: null });
+        // Never has a schema - it isn't a real stage, see this
+        // function's own header comment.
+        setConfigEditor({
+          nodeId,
+          text: JSON.stringify(graphMeta.current.input, null, 2),
+          error: null,
+          schema: null,
+          formValue: null,
+          mode: "json",
+        });
         setConfigNotice(null);
         setContextMenu(null);
         return;
       }
       const node = nodes.find((n) => n.id === nodeId);
       if (node) {
-        setConfigEditor({ nodeId, text: JSON.stringify(node.data.config ?? {}, null, 2), error: null });
-        setConfigNotice(null);
+        const schema = stageTypes.find((t) => t.name === node.data.type)?.config_schema ?? null;
+        const rawConfig = (node.data.config ?? {}) as Record<string, unknown>;
+        if (schema != null) {
+          const formValue = applyConfigDefaults(schema, rawConfig);
+          setConfigEditor({
+            nodeId,
+            text: JSON.stringify(formValue, null, 2),
+            error: null,
+            schema,
+            formValue,
+            mode: "form",
+          });
+        } else {
+          setConfigEditor({
+            nodeId,
+            text: JSON.stringify(rawConfig, null, 2),
+            error: null,
+            schema: null,
+            formValue: null,
+            mode: "json",
+          });
+        }
       }
       setContextMenu(null);
     },
-    [nodes],
+    [nodes, stageTypes],
   );
+
+  // Switches the modal between its generated form and the raw-JSON
+  // escape hatch, keeping both representations in sync so nothing
+  // entered on one side is lost switching to the other. Only reachable
+  // when configEditor.schema is set (App.tsx's JSX guards the toggle
+  // button on that) - a schema-less config only ever has "json" mode.
+  const toggleConfigMode = useCallback(() => {
+    setConfigEditor((ce) => {
+      if (!ce) return ce;
+      if (ce.mode === "form") {
+        return { ...ce, mode: "json", text: JSON.stringify(ce.formValue, null, 2), error: null };
+      }
+      try {
+        const parsed = JSON.parse(ce.text) as Record<string, unknown>;
+        return { ...ce, mode: "form", formValue: parsed, error: null };
+      } catch (err) {
+        return { ...ce, error: `Invalid JSON: ${String(err)}` };
+      }
+    });
+  }, []);
 
   const handleSaveConfig = useCallback(async () => {
     if (!configEditor) return;
 
     let parsed: unknown;
-    try {
-      parsed = JSON.parse(configEditor.text);
-    } catch (err) {
-      setConfigEditor((ce) => (ce ? { ...ce, error: `Invalid JSON: ${String(err)}` } : ce));
-      return;
+    if (configEditor.mode === "form") {
+      parsed = configEditor.formValue;
+    } else {
+      try {
+        parsed = JSON.parse(configEditor.text);
+      } catch (err) {
+        setConfigEditor((ce) => (ce ? { ...ce, error: `Invalid JSON: ${String(err)}` } : ce));
+        return;
+      }
     }
 
     if (configEditor.nodeId === RING_INPUT_NODE_ID) {
@@ -845,7 +913,9 @@ function App() {
               border: "1px solid var(--border)",
               borderRadius: 10,
               padding: 16,
-              width: 420,
+              width: 460,
+              maxHeight: "80vh",
+              overflowY: "auto",
               boxShadow: "0 8px 24px rgba(0, 0, 0, 0.3)",
             }}
             onClick={(e) => e.stopPropagation()}
@@ -854,42 +924,64 @@ function App() {
               Configure: {nodes.find((n) => n.id === configEditor.nodeId)?.data.label ?? configEditor.nodeId}
             </p>
             <p style={{ fontSize: 11, color: "var(--text-mute)", marginTop: -8 }}>
-              {configEditor.nodeId === RING_INPUT_NODE_ID
-                ? "Raw JSON - the graph's top-level \"input\" (ring_name/ring_size/record_type). OK only " +
-                  "applies it to the canvas - nothing is written to disk until you hit Save/Save As."
-                : "Raw JSON - this stage's config shape isn't known to the UI. OK re-checks how many output " +
-                  "ports this stage has and redraws its handles, but only applies it to the canvas - nothing " +
-                  "is written to disk until you hit Save/Save As."}
+              {configEditor.mode === "form"
+                ? "Generated from this stage's own config schema. OK only applies it to the canvas - " +
+                  "nothing is written to disk until you hit Save/Save As."
+                : configEditor.nodeId === RING_INPUT_NODE_ID
+                  ? "Raw JSON - the graph's top-level \"input\" (ring_name/ring_size/record_type). OK only " +
+                    "applies it to the canvas - nothing is written to disk until you hit Save/Save As."
+                  : "Raw JSON - this stage's config shape isn't known to the UI. OK re-checks how many output " +
+                    "ports this stage has and redraws its handles, but only applies it to the canvas - nothing " +
+                    "is written to disk until you hit Save/Save As."}
             </p>
-            <textarea
-              value={configEditor.text}
-              onChange={(e) => setConfigEditor((ce) => (ce ? { ...ce, text: e.target.value, error: null } : ce))}
-              rows={12}
-              style={{
-                width: "100%",
-                boxSizing: "border-box",
-                fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                background: "var(--bg)",
-                color: "var(--text)",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                padding: 8,
-                resize: "vertical",
-              }}
-            />
+            {configEditor.mode === "form" && configEditor.schema != null && configEditor.formValue != null ? (
+              <ConfigForm
+                fields={configEditor.schema}
+                value={configEditor.formValue}
+                onChange={(next) =>
+                  setConfigEditor((ce) => (ce ? { ...ce, formValue: next, error: null } : ce))
+                }
+              />
+            ) : (
+              <textarea
+                value={configEditor.text}
+                onChange={(e) => setConfigEditor((ce) => (ce ? { ...ce, text: e.target.value, error: null } : ce))}
+                rows={12}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  padding: 8,
+                  resize: "vertical",
+                }}
+              />
+            )}
             {configEditor.error && (
               <p style={{ fontSize: 11, color: "var(--critical)", fontFamily: "var(--font-mono)" }}>
                 {configEditor.error}
               </p>
             )}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-              <button className="btn" onClick={() => setConfigEditor(null)}>
-                Cancel
-              </button>
-              <button className="btn" onClick={handleSaveConfig}>
-                OK
-              </button>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 8 }}>
+              {configEditor.schema != null ? (
+                <button className="btn" style={{ width: "auto", padding: "6px 12px" }} onClick={toggleConfigMode}>
+                  {configEditor.mode === "form" ? "Edit as JSON" : "Use form"}
+                </button>
+              ) : (
+                <span />
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn" onClick={() => setConfigEditor(null)}>
+                  Cancel
+                </button>
+                <button className="btn" onClick={handleSaveConfig}>
+                  OK
+                </button>
+              </div>
             </div>
           </div>
         </>

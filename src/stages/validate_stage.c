@@ -106,3 +106,17 @@ validate_stage_get_status(void *state, struct stage_status *out)
 	snprintf(out->fields[1].name, STAGE_STATUS_NAME_MAX, "records_flagged");
 	out->fields[1].value = atomic_load_explicit(&cfg->flagged, memory_order_relaxed);
 }
+
+void
+validate_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 1;
+	out->fields[0] = (struct stage_config_field){
+		.name = "require_magic",
+		.type = CONFIG_FIELD_BOOLEAN,
+		.description = "Flag a record whose chrono_record_hdr.magic doesn't match as "
+			       "integrity-failed, instead of trusting any magic value.",
+		.has_default = true,
+		.default_value = "true",
+	};
+}

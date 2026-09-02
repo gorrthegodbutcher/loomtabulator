@@ -72,3 +72,23 @@ convert_stage_teardown(void *state)
 {
 	free(state);
 }
+
+void
+convert_stage_get_config_schema(struct stage_config_schema *out)
+{
+	out->field_count = 2;
+	out->fields[0] = (struct stage_config_field){
+		.name = "scale",
+		.type = CONFIG_FIELD_NUMBER,
+		.description = "engineering = raw * scale + offset",
+		.has_default = true,
+		.default_value = "1.0",
+	};
+	out->fields[1] = (struct stage_config_field){
+		.name = "offset",
+		.type = CONFIG_FIELD_NUMBER,
+		.description = "engineering = raw * scale + offset",
+		.has_default = true,
+		.default_value = "0.0",
+	};
+}

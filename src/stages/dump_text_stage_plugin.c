@@ -23,6 +23,7 @@ static const struct stage g_stage = {
 	.out_port_count = dump_text_out_port_count,
 	.process = dump_text_stage_process,
 	.teardown = dump_text_stage_teardown,
+	.get_config_schema = dump_text_stage_get_config_schema,
 };
 
 uint32_t
