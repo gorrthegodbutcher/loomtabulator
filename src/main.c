@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <rte_eal.h>
 #include <rte_ring.h>
@@ -136,12 +137,36 @@ build_eal_argv(int argc, char **argv, int *out_argc)
  * with "EAL: Cannot allocate memzone list" / "Cannot init memzone",
  * because the fresh rte_eal_init() collides with its own predecessor's
  * still-open (leaked across exec) fds for the exact same resources.
- * Force-closing everything above stdio right before execv() is the
- * standard fix for this class of problem in any self-re-exec daemon,
- * not something specific to a bug in this project's own shutdown code -
- * scans /proc/self/fd rather than looping 0..sysconf(_SC_OPEN_MAX)
- * (which can be an enormous, mostly-empty range) for exactly the fds
- * that actually exist. */
+ * Marking everything above stdio FD_CLOEXEC (not closing it directly)
+ * right before execv() is the standard fix for this class of problem in
+ * any self-re-exec daemon, not something specific to a bug in this
+ * project's own shutdown code - scans /proc/self/fd rather than looping
+ * 0..sysconf(_SC_OPEN_MAX) (which can be an enormous, mostly-empty
+ * range) for exactly the fds that actually exist.
+ *
+ * FD_CLOEXEC, not an outright close(): empirically hit a real race
+ * doing this the other way. Every non-main lcore rte_eal_init() launches
+ * (any --workers=N with N>=1) parks its pthread forever in
+ * eal_thread_wait_command(), blocked in read() on that lcore's own EAL
+ * command pipe - rte_eal_cleanup() does not (and, per its own public
+ * contract, is not expected to) join or kill these; they're meant to sit
+ * parked until the process actually exits. Closing that pipe's fd out
+ * from under the still-blocked read() (which /proc/self/fd sees, since
+ * it's an fd "above stdio" like any other) wakes it with EOF/EBADF,
+ * and DPDK's own eal_thread_wait_command() treats that as fatal -
+ * unconditional rte_panic("cannot read on configuration pipe"), which
+ * on this build's libc aborts the whole process. Observed exactly this:
+ * "EAL: PANIC in eal_thread_wait_command()" logged mid-reload, with the
+ * fresh instance only coming up afterward because execv() happened to
+ * win the race and tear down that panicking thread before its abort()
+ * landed - a coin flip, not a guarantee. FD_CLOEXEC sidesteps this
+ * entirely: it's pure fd-table metadata, so it can't wake a blocked
+ * reader the way close() does. The actual close happens as part of
+ * execve()'s own atomic image replacement, which POSIX guarantees
+ * terminates every other thread in the process (including any lcore
+ * still parked in that read()) before the surviving thread's fd table
+ * is cleaned up - so by the time these fds are actually closed, there's
+ * no thread left to observe it. */
 static void
 close_fds_above_stdio(void)
 {
@@ -156,7 +181,7 @@ close_fds_above_stdio(void)
 		long fd = strtol(entry->d_name, &endptr, 10);
 		if (*endptr != '\0' || fd < 3 || fd == dfd)
 			continue;
-		close((int)fd);
+		fcntl((int)fd, F_SETFD, FD_CLOEXEC);
 	}
 	closedir(d);
 }
